@@ -6,7 +6,7 @@
     Drives terminal64.exe through a generated .ini file, waits for it to finish,
     then parses the HTML report into structured data.
 
-    Eight behaviours this script exists to work around. All confirmed by
+    Nine behaviours this script exists to work around. All confirmed by
     experiment on 2026-08-05, MT5 build 5836.
 
     0. METATRADER MUST NOT ALREADY BE RUNNING.
@@ -69,6 +69,15 @@
        with a set file naming one unrelated input.
        This script therefore writes a set file on every run. That is
        what makes a backtest a function of the source code.
+
+    9. THE TERMINAL OUTLIVES THE PROCESS YOU WAITED ON.
+       The report is written, then MetaTrader reloads its profile, opens
+       charts and initialises the EA before actually exiting. Measured:
+       report at 15:42:10, "exit with code 0" at 15:43:25, 75 seconds
+       later. A second backtest started inside that window hits the
+       already-running check in note 0 and fails, so the error lands on
+       the NEXT run rather than the one that caused it. This script waits
+       for the process to disappear before returning.
 
 .PARAMETER Symbol
     Broker symbol name. Check the suffix. Exness uses EURUSDm, not EURUSD.
@@ -249,6 +258,18 @@ if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
 }
 $sw.Stop()
 Remove-Item -LiteralPath $iniPath -Force -ErrorAction SilentlyContinue
+
+# The process we waited on is not the whole story. See note 9. Wait for the
+# terminal to actually leave the process table, otherwise the next run trips
+# the already-running guard at the top of this script and fails for a reason
+# that has nothing to do with it.
+$lingerDeadline = (Get-Date).AddSeconds(180)
+while ((Get-Date) -lt $lingerDeadline) {
+    $lingering = @(Get-Process -Name 'terminal64' -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Path -eq $Terminal })
+    if ($lingering.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 500
+}
 
 if (-not (Test-Path -LiteralPath $reportInData)) {
     $hint = "No report at $reportInData. Check $DataFolder\Tester\logs for the reason. " +

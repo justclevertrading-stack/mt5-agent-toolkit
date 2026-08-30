@@ -145,7 +145,11 @@ error or a verified pattern are the most useful contribution you can make.
   to. If a description is ambiguous it is supposed to ask you, not guess.
 - The MetaTrader economic calendar returns nothing inside the Strategy Tester,
   so a news filter cannot be backtested honestly. There is no fake one here.
-- Verified against MetaTrader 5 build 5836. Earlier builds are untested.
+- Every trap listed above was reproduced on MetaTrader 5 build **5836**.
+  The compile path was re-verified on build **6140**. Other builds are
+  untested, and a build that fixes one of these traps will not announce it.
+- If something on your machine keeps MetaTrader running in the background,
+  headless backtests cannot start at all. See note 0 in `scripts/backtest.ps1`.
 
 ---
 
