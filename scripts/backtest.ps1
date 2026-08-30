@@ -49,10 +49,6 @@
        Common/Login and Common/Server pin a specific saved account, which also
        keeps automation off a live account by accident.
 
-.PARAMETER Expert
-    EA path relative to MQL5\Experts, including the .ex5 extension.
-    Example: Advisors\MyEA.ex5
-
     7. EA INPUTS COME FROM A .SET FILE, NOT THE COMMAND LINE.
        There is no ini key for individual inputs. They go in a .set file
        under MQL5\Profiles\Tester, named by Tester/ExpertParameters. Any
@@ -78,6 +74,10 @@
        already-running check in note 0 and fails, so the error lands on
        the NEXT run rather than the one that caused it. This script waits
        for the process to disappear before returning.
+
+.PARAMETER Expert
+    EA path relative to MQL5\Experts, including the .ex5 extension.
+    Example: Advisors\MyEA.ex5
 
 .PARAMETER Symbol
     Broker symbol name. Check the suffix. Exness uses EURUSDm, not EURUSD.
