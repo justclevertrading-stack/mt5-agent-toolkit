@@ -58,7 +58,7 @@ The list is the actual product.
 Requires Windows, MetaTrader 5, PowerShell 5.1 or later, and Git.
 
 ```powershell
-git clone https://github.com/<you>/mt5-agent-toolkit.git
+git clone https://github.com/smizxe/mt5-agent-toolkit.git
 cd mt5-agent-toolkit
 .\scripts\setup.ps1          # finds MetaTrader, writes config\paths.json
 ```
