@@ -164,6 +164,85 @@ still closes at a small loss.
 
 ---
 
+## Scaling out: close part at a first target, then break even
+
+Verified in `src/Experts/OrbLondon.mq5`, 2026-09-15, build 6182. 68 positions,
+35 partial closes, no rejected close and no rejected modify.
+
+```cpp
+double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+double closeVol = NormalizeDouble(MathFloor((volume * percent / 100.0) / lotStep) * lotStep, 2);
+
+if(closeVol >= minLot && (volume - closeVol) >= minLot)
+   trade.PositionClosePartial(ticket, closeVol);
+else
+   Print("Volume cannot be split. Whole position runs to the final target.");
+
+trade.PositionModify(ticket, NormalizePrice(openPrice), tp);   // stop to entry
+```
+
+Both halves of the test matter. `closeVol >= minLot` stops a zero-volume
+request; `(volume - closeVol) >= minLot` stops the broker being left with a
+remainder it cannot hold. At the minimum lot there is nothing to split, and the
+EA must say so rather than silently skipping the target.
+
+Decide in advance what happens when the split is impossible. Running the whole
+position to the far target is one answer, closing all of it at the near target
+is another. Both are defensible; picking one silently at 3am is not.
+
+### Carry no state between ticks
+
+The obvious implementation sets a `tp1Done` flag. It is wrong: the flag is
+gone after a restart, and the EA scales out of the same position twice.
+
+Ask the deal history instead. This is the reliable test, because the partial
+close itself is the thing being remembered:
+
+```cpp
+bool HasClosedPart(const ulong positionId)
+{
+   if(!HistorySelectByPosition(positionId))
+      return(false);
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+         return(true);
+   }
+   return(false);
+}
+
+// Called with PositionGetInteger(POSITION_IDENTIFIER), not the ticket. On a
+// hedging account they are usually equal; on netting they are not.
+```
+
+A tempting shortcut is to read the stop instead: if it already sits at the
+entry price, TP1 must have happened. That works only while the break-even move
+is switched on. The moment it is made optional, the marker disappears and the
+EA scales out on every tick for the rest of the trade. Measured 2026-09-15
+while building a no-break-even variant of `OrbLondon`.
+
+Keep the stop test as a second condition, not the only one: it covers the
+position that was too small to split, where no `out` deal ever appears.
+
+```cpp
+if(HasClosedPart(positionId)) return;
+if(InpMoveToBreakEven && sl > 0.0 &&
+   (isBuy ? (sl >= open - halfPoint) : (sl <= open + halfPoint))) return;
+
+// The R multiple the targets were built from, recovered from the order's own TP.
+double span = MathAbs(tp - open) / InpTp2RangeMult;
+```
+
+The final target is the record of the trade's original size, so a restart in
+the middle of a trade changes nothing at all.
+
+---
+
 ## Multiple positions on a netting account
 
 On a netting account the platform keeps one net position per symbol. Sending a

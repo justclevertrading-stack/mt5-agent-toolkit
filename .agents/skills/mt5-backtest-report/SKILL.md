@@ -84,14 +84,99 @@ months. The losers were bigger than the winners.
 
 Win rate without average win versus average loss says nothing.
 
+## An EA that scales out breaks Total Trades and win rate
+
+Measured 2026-09-15, `OrbLondon` on XAUUSD M5, build 6182.
+
+MT5 counts a **closing deal** as a trade. An EA that closes half at a first
+target and the rest later produces two closing deals from one position, and
+the report counts both.
+
+| | Report says | Per position |
+|---|---|---|
+| Trades | 103 | 68 |
+| Win rate | 67.96% | 51.47% |
+| Average profit trade | 38.66 | 77.32 |
+| Profit factor | 0.87 | 0.87 |
+| Max equity drawdown | 10.63% | 10.63% |
+
+Every partial take-profit is booked as a win, and the remainder that comes back
+to break even is booked as a second, near-zero trade. The win rate is inflated
+by sixteen points and the average win halved. Profit factor, net profit and
+drawdown are sums over the same deals either way, so they are unaffected.
+
+Spot it from `Total Deals` against `Total Trades`. With no scaling out,
+deals = 2 x trades. Here it was 171 deals to 103 trades, which means 68 entries
+and 103 exits, so 35 positions closed in two pieces.
+
+Recompute per position before quoting a win rate. Walk the deals table in time
+order: a deal with direction `in` opens a position, every `out` until the next
+`in` belongs to it, and the position wins if the sum of those profits is
+positive. Say which basis the number is on.
+
+## History Quality "n/a" means re-run it, not "bad data"
+
+Measured 2026-09-15, build 6182. The same EA, inputs, symbol and window run
+twice on `Model=1`:
+
+| | First run | Second run |
+|---|---|---|
+| History Quality | **n/a** | **100%** |
+| Bars | 49456 | 49456 |
+| Ticks | 987 551 | 987 551 |
+| Total net profit | -417.72 | -417.72 |
+
+Identical data, identical trades, different quality label. The first run was
+the one that pulled the history down from the broker, and the tester reports
+`n/a` rather than a percentage when it has been filling the cache as it goes.
+
+So `n/a` is not evidence of a data problem, and it is not evidence of good data
+either. It carries no information at all. Run the same test again: the second
+run reports a real percentage, and *that* is the number to judge.
+
+Do not report `n/a` to the user as "history quality below 100%", which is what
+`backtest.ps1` currently warns. Re-run first, then quote the percentage.
+
 ## Four reasons a backtest lies
 
 State whichever of these apply. Do not let a good-looking result pass without
 checking them.
 
 **1. Commission and swap were not set.**
-The tester uses the symbol's configured costs. If they are zero, every result
-is inflated. Compare the symbol specification against the live account.
+Every deal in the report showing `0.00` commission does **not** mean the
+account is commission-free. MT5 charges commission from the broker's group
+settings on the server, which a terminal never receives and a tester run
+therefore cannot apply. Confirmed against a Vantage live account, 2026-09-15:
+zero commission on all 171 deals.
+
+So the report cannot answer the question. The account owner has to. Ask which
+account type it is, because the answer changes the arithmetic completely:
+a commission-free Standard account pays entirely through the spread, which the
+tester *does* model, while a raw-spread account pays a per-lot fee the tester
+has silently omitted.
+
+Take it as an input so the number is recorded in the report header, apply it to
+the `OnTester` result, and never let it change a trade:
+
+```cpp
+input double InpCommissionPerLot = 0.0;   // Round trip, $ per lot
+
+double OnTester()
+{
+   // Sum DEAL_ENTRY_IN volumes: one round trip is charged per lot entered,
+   // so partial exits do not add to it.
+   double commission = enteredVolume * InpCommissionPerLot;
+   return(TesterStatistics(STAT_PROFIT) - commission);
+}
+```
+
+Keeping it out of lot sizing and out of the break-even level is deliberate. The
+moment commission moves a stop, two runs at different commission settings stop
+being comparable, and the variant table stops meaning anything.
+
+Because the charge is linear in volume, one run answers every rate: report the
+lots traded alongside the result and any commission can be applied afterwards
+without testing again.
 
 **2. The modelling mode was too coarse.**
 `Model=1` (one minute OHLC) is fast and fine for strategies acting on closed
