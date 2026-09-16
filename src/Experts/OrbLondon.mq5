@@ -6,6 +6,8 @@
 //| Range      the three M5 candles 08:00, 08:05, 08:10 UK time       |
 //| Long       first M5 close above the range high, EMA9 > EMA21      |
 //| Short      first M5 close below the range low,  EMA9 < EMA21      |
+//|            EMAs on InpEmaTimeframe, M5 by default, H1 for the     |
+//|            higher timeframe filter variant                        |
 //| Stop       the opposite side of the range                         |
 //| TP1        one range height, closes half and moves stop to entry  |
 //| TP2        two range heights, for the remainder                   |
@@ -45,8 +47,8 @@ input int    InpServerUtcOffsetWinter = 2;  // Server UTC offset outside EU DST
 input int    InpServerUtcOffsetSummer = 3;  // Server UTC offset during EU DST
 
 input group "=== Strategy ===";
-input int    InpFastEmaPeriod    = 9;       // Fast EMA period, M5
-input int    InpSlowEmaPeriod    = 21;      // Slow EMA period, M5
+input int    InpFastEmaPeriod    = 9;       // Fast EMA period
+input int    InpSlowEmaPeriod    = 21;      // Slow EMA period
 input double InpMinRangeUsd      = 5.0;     // Skip session below this range height, $
 input double InpMaxRangeUsd      = 25.0;    // Skip session above this range height, $
 input bool   InpFirstBreakOnly   = true;    // Only the first close beyond a side counts
@@ -56,6 +58,10 @@ input double InpTp1ClosePercent  = 50.0;    // Percent of the position closed at
 
 input group "=== Variants. Baseline is every one of these at its default ===";
 input bool   InpUseEmaFilter     = true;    // Require the EMA to agree with the break
+// The EMAs are read on the last CLOSED bar of this timeframe at the moment the
+// M5 break candle closes. On H1 that is the previous full hour, never the hour
+// still forming, so the value cannot change after the signal is taken.
+input ENUM_TIMEFRAMES InpEmaTimeframe = PERIOD_M5; // Timeframe the two EMAs are read on
 input bool   InpMoveToBreakEven  = true;    // Move the stop to entry at TP1
 input bool   InpStopAtMidpoint   = false;   // Stop at the range midpoint, not the far side
 input bool   InpRangeFilterPct   = false;   // Filter the range by percent of price, not dollars
@@ -114,7 +120,8 @@ datetime loggedSession = 0;
 //+------------------------------------------------------------------+
 //| STRATEGY. This is the only section you normally change.           |
 //|                                                                   |
-//| Everything here reads closed M5 bars and the two EMAs. It writes  |
+//| Everything here reads closed M5 bars and the two EMAs, which are  |
+//| the last closed bar of InpEmaTimeframe. It writes                 |
 //| signalDir, signalStop and signalSpan. It never sends an order:    |
 //| the safety layer below sizes, normalises and checks the trade.    |
 //+------------------------------------------------------------------+
@@ -257,8 +264,9 @@ void DetectSignal()
    {
       if(InpUseEmaFilter && fastMA[1] <= slowMA[1])
       {
-         PrintFormat("%s: close %.*f above range high %.*f but EMA%d %.*f is not above EMA%d %.*f. No trade.",
+         PrintFormat("%s: close %.*f above range high %.*f but %s EMA%d %.*f is not above EMA%d %.*f. No trade.",
                      InpComment, _Digits, close, _Digits, hi,
+                     EnumToString(InpEmaTimeframe),
                      InpFastEmaPeriod, _Digits, fastMA[1],
                      InpSlowEmaPeriod, _Digits, slowMA[1]);
          return;
@@ -278,8 +286,9 @@ void DetectSignal()
    {
       if(InpUseEmaFilter && fastMA[1] >= slowMA[1])
       {
-         PrintFormat("%s: close %.*f below range low %.*f but EMA%d %.*f is not below EMA%d %.*f. No trade.",
+         PrintFormat("%s: close %.*f below range low %.*f but %s EMA%d %.*f is not below EMA%d %.*f. No trade.",
                      InpComment, _Digits, close, _Digits, lo,
+                     EnumToString(InpEmaTimeframe),
                      InpFastEmaPeriod, _Digits, fastMA[1],
                      InpSlowEmaPeriod, _Digits, slowMA[1]);
          return;
@@ -337,8 +346,8 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
    }
 
-   fastHandle = iMA(_Symbol, WORK_TF, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   slowHandle = iMA(_Symbol, WORK_TF, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   fastHandle = iMA(_Symbol, InpEmaTimeframe, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   slowHandle = iMA(_Symbol, InpEmaTimeframe, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
    if(fastHandle == INVALID_HANDLE || slowHandle == INVALID_HANDLE)
    {
       Print("Failed to create indicator handles, error ", GetLastError());

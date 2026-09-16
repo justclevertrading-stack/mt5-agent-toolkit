@@ -88,6 +88,35 @@ Always check the `CopyBuffer` return. Early in a backtest, and after a
 reconnect, there are simply not enough bars yet. Returning is correct; treating
 an empty array as zeros is not.
 
+### An indicator on a higher timeframe than the chart
+
+Verified 2026-09-16, build 6182, `OrbLondon` reading H1 EMAs from an M5 chart.
+
+Make the timeframe an input and pass it to the handle. Nothing else in the
+read path changes: `CopyBuffer` indexes bars of the **indicator's** timeframe,
+so with the EA acting on M5 closes, index 1 is the last *closed* H1 bar.
+
+```cpp
+input ENUM_TIMEFRAMES InpEmaTimeframe = PERIOD_M5;   // PERIOD_CURRENT also works
+
+fastHandle = iMA(_Symbol, InpEmaTimeframe, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+// ... CopyBuffer(fastHandle, 0, 0, 3, fastMA) as above; fastMA[1] is the closed H1 bar
+```
+
+Two things this means in practice:
+
+- Every M5 signal inside the same hour reads the same value. Seen in the log:
+  10:20 and 10:25 both reported `PERIOD_H1 EMA9 2758.40 ... EMA21 2763.49`.
+  That is the non-repainting choice. If the strategy wants the EMA "as it
+  stands right now" including the hour still forming, read index 0 instead,
+  and say so in the spec, because the two give different trades.
+- In a `.set` file, and therefore in `backtest.ps1 -Inputs`, an
+  `ENUM_TIMEFRAMES` input is its **integer** value, not the name.
+  `PERIOD_H1` is `16385`, `PERIOD_M5` is `5`, `PERIOD_H4` is `16388`,
+  `PERIOD_D1` is `16408`. `-Inputs @{ InpEmaTimeframe = 16385 }` was
+  confirmed by the report header showing `InpEmaTimeframe=16385` and the
+  EA's own `EnumToString` printing `PERIOD_H1`.
+
 ---
 
 ## New bar detection

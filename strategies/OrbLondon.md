@@ -33,8 +33,14 @@ offsets above put it at 22:00 to 23:00 London in both seasons. Measured
 ## Indicators
 | Name | Parameters | Applied to | Purpose |
 |---|---|---|---|
-| EMA fast | 9, M5 | Close | Trend filter, read on the breakout candle |
-| EMA slow | 21, M5 | Close | Trend filter, read on the breakout candle |
+| EMA fast | 9, `InpEmaTimeframe` (M5 default) | Close | Trend filter, read on the breakout candle |
+| EMA slow | 21, `InpEmaTimeframe` (M5 default) | Close | Trend filter, read on the breakout candle |
+
+The EMAs are read on the last **closed** bar of `InpEmaTimeframe` at the
+moment the M5 break candle closes. With the default M5 that is the break
+candle itself. With H1 (variants G and H below) it is the previous full hour,
+not the hour still forming, so every break inside the same hour sees the same
+EMA values and the filter cannot repaint.
 
 ## The range
 - The three M5 candles opening 08:00, 08:05 and 08:10 UK.
@@ -102,6 +108,7 @@ between runs. Baseline is every one of them at its default.
 | Input | Default | Variant it produces |
 |---|---|---|
 | `InpUseEmaFilter` | true | false: take every break, no EMA agreement needed |
+| `InpEmaTimeframe` | PERIOD_M5 | PERIOD_H1 (16385 in a set file): the 9/21 EMAs are read on the last closed H1 bar instead of the M5 break candle |
 | `InpMoveToBreakEven` | true | false: TP1 still closes half, stop stays at the range edge |
 | `InpStopAtMidpoint` | false | true: stop at the range midpoint. Targets stay at 1 and 2 range heights, so the lot doubles at the same 1% risk |
 | `InpRangeFilterPct` | false | true: filter the range by `InpMinRangePct` to `InpMaxRangePct` of the range midpoint instead of by dollars |
@@ -123,6 +130,38 @@ closing deal as a trade, which the scale-out inflates.
 The only variant above break-even is the one with the EMA filter removed, and
 splitting it in two shows the edge is not stable: Jan to Jun 59 trades at PF
 1.28, Jul to Sep 21 trades at PF 0.62. Not run on real ticks.
+
+### Variants G and H: H1 EMA filter
+
+Measured 2026-09-16, same settings as the table above. G is the baseline with
+`InpEmaTimeframe = PERIOD_H1`. H is G plus `InpRangeFilterPct = true`
+(0.15% to 0.60% of the range midpoint instead of $5 to $25). 2024 is an
+out-of-sample check; nothing was tuned on it. Trades and win rate are per
+position. "Max DD" is the report's maximal equity drawdown for a full run and
+the balance drawdown over closed positions for a sub-period, since the deals
+table cannot give an intrabar figure. Reports `bt-20260916-154943` (G 2025),
+`154949` (H 2025), `155026` (G 2024), `155004` (H 2024).
+
+| Variant | Period | Trades | Win rate | PF | Net | Max DD |
+|---|---|---|---|---|---|---|
+| G | 2025.01.01 to 2025.09.12 | 56 | 48.21% | 0.83 | -466.96 | 7.80% equity |
+| G | 2025 Jan to Jun | 40 | 50.00% | 0.98 | -41.52 | 7.19% balance |
+| G | 2025 Jul to Sep | 16 | 43.75% | 0.50 | -425.44 | 7.51% balance |
+| G | 2024.01.01 to 2024.12.31 | 12 | 33.33% | 0.44 | -424.79 | 4.25% equity |
+| H | 2025.01.01 to 2025.09.12 | 61 | 49.18% | 0.90 | -289.27 | 7.72% equity |
+| H | 2025 Jan to Jun | 45 | 51.11% | 1.06 | +133.24 | 6.68% balance |
+| H | 2025 Jul to Sep | 16 | 43.75% | 0.51 | -422.51 | 7.50% balance |
+| H | 2024.01.01 to 2024.12.31 | 35 | 37.14% | 0.69 | -630.84 | 7.13% equity |
+
+Neither is above break-even over any full period, and both share the
+baseline's shape: Jan to Jun roughly flat, Jul to Sep clearly losing.
+
+The 2024 trade count for G is not a property of the H1 filter. The dollar
+range filter skipped 237 of 258 sessions in 2024 because the 08:00 to 08:15
+range on gold was mostly $2 to $4 at 2024 prices; only 21 sessions reached
+$5. The percent filter (H) admitted 35 positions from the same year. A range
+filter in dollars is therefore a filter on the price level as much as on the
+range, and the two years are not comparable under it.
 
 ## Explicitly forbidden
 No averaging down, no martingale, no second position, no re-entry after the

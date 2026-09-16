@@ -114,6 +114,28 @@ order: a deal with direction `in` opens a position, every `out` until the next
 `in` belongs to it, and the position wins if the sum of those profits is
 positive. Say which basis the number is on.
 
+The deals table is in the report HTML (UTF-16 LE), after a cell reading
+`Deals` and a 13-column header `Time, Deal, Symbol, Type, Direction, Volume,
+Price, Order, Commission, Swap, Profit, Balance, Comment`. The first row is
+the `balance` deposit, and the `Comment` cell is absent on a scale-out deal
+that was not the stop or the target. Verified 2026-09-16: a parser written
+this way reproduced the recorded baseline exactly, 68 positions, 51.47%,
+PF 0.87, -417.72.
+
+## Splitting one run into sub-periods
+
+Split the **same run's** deals table by position open date. Do not run the
+sub-periods as separate backtests: with percent-of-balance sizing the second
+half starts from a different balance and its lots, and therefore its dollar
+figures, are no longer comparable with the full run.
+
+From the deals table a sub-period gives trades, win rate, profit factor and
+net profit exactly. The drawdown it gives is the **balance** drawdown over
+closed positions, as a percent of the running peak starting from the balance
+at the window's start. The report's equity drawdown is intrabar and only
+exists for the whole run, so a table that mixes the two must say which is
+which.
+
 ## History Quality "n/a" means re-run it, not "bad data"
 
 Measured 2026-09-15, build 6182. The same EA, inputs, symbol and window run
