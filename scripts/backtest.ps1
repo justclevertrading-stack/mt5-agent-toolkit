@@ -217,6 +217,7 @@ $iniLines = @(
 )
 if ($Login)  { $iniLines += "Login=$Login" }
 if ($Server) { $iniLines += "Server=$Server" }
+if ($cfg -and $cfg.password) { $iniLines += "Password=$($cfg.password)" }
 $iniLines += @(
     ''
     '[Tester]'
