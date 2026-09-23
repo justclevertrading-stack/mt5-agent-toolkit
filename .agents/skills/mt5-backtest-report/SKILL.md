@@ -109,6 +109,13 @@ Spot it from `Total Deals` against `Total Trades`. With no scaling out,
 deals = 2 x trades. Here it was 171 deals to 103 trades, which means 68 entries
 and 103 exits, so 35 positions closed in two pieces.
 
+An EA that writes one CSV row per position avoids the whole problem and gives
+splits the report cannot, such as which filter rejected a signal that was never
+traded. See skill `mql5-patterns`, `references/logging-and-files.md`. Verified
+2026-09-23 on five `EmaCross` runs: the per-position net from the EA's CSV
+equalled the report's net to the cent every time, which is the check that makes
+the CSV usable in place of the deals table.
+
 Recompute per position before quoting a win rate. Walk the deals table in time
 order: a deal with direction `in` opens a position, every `out` until the next
 `in` belongs to it, and the position wins if the sum of those profits is
@@ -239,7 +246,7 @@ Work down this list before touching any EA code.
 |---|---|---|
 | Script exits in about a second, tester log gains **no new lines** | MetaTrader is already open. Windows hands `/config:` to the running instance, which ignores it, and the launcher returns 0 | Close MetaTrader. `backtest.ps1` now refuses to start in this case rather than letting it look like a data fault |
 | Tester log says `symbol ... not exist` | Wrong suffix | Exness is `EURUSDm`, not `EURUSD`. Read Market Watch |
-| `tester not started because the account is not specified` | No saved login, or a BOM in the `.ini` | Log in once by hand, and never write the `.ini` with `Set-Content -Encoding utf8` |
+| `tester not started because the account is not specified` | No saved login, a BOM in the `.ini`, or a wrong `login` / `server` in `config\paths.json` | Log in once by hand, and never write the `.ini` with `Set-Content -Encoding utf8`. See below for the paths.json case |
 | Agent connects then disconnects within a millisecond | Another program holds port 3000 | `backtest.ps1` scans for a free port already |
 | Report path was absolute | Silently ignored | The report name must be relative to the data folder |
 | A backtest that *just* succeeded is followed by one that refuses to start | The previous run's terminal is still shutting down | Wait, then run again. See below |
@@ -247,6 +254,32 @@ Work down this list before touching any EA code.
 The first row is by far the most common in daily use, because a trader keeps
 MetaTrader open all day. It also produces the least evidence: exit code zero,
 empty logs, no report. Check it first.
+
+### "account is not specified" with a terminal that is logged in
+
+Met 2026-09-23. Every run failed at once with that line in
+`Tester\logs\<date>.log`, on a machine whose terminal was logged into a demo
+account and had run backtests a week earlier. The cause was in
+`config\paths.json`:
+
+```json
+"login": 0,
+"server": "$p = \"C:\\mt5-agent-toolkit\\config\\paths.json\"",
+```
+
+A shell command intended to edit the file had written its own source text into
+`server`, and `login` was zero. `backtest.ps1` skips `Login=` when the value is
+falsy but still writes the junk `Server=` line, so the `.ini` named a server
+that does not exist with no account to go with it.
+
+Two things follow. The real values are recoverable without asking: the
+terminal's own `config\common.ini` holds the `Login` and `Server` of the last
+account it logged into, and those are exactly what the `[Common]` section
+needs. And this is what AGENTS.md means about editing files through the shell:
+the damage is silent, lands in a file nobody reads, and surfaces days later as
+a failure that looks like a tester problem.
+
+Check `config\paths.json` before believing anything else about this error.
 
 ## The terminal outlives the script that started it
 

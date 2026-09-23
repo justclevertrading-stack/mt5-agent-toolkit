@@ -20,6 +20,7 @@ Start from `templates/EA_Template.mq5` rather than an empty file.
 | `references/entry-exit.md` | Sending and closing orders, trailing stop, break even, multiple positions |
 | `references/filters.md` | Server time, trading hours, day of week, spread, connection loss, news |
 | `references/risk-sizing.md` | Lot from percent risk, and the two rails that stop a tight stop becoming a huge position |
+| `references/logging-and-files.md` | Writing a CSV from an EA, where a tester run's files go, and classifying how a position ended |
 | `references/diagnosing-no-trades.md` | What to do when the backtest reports zero trades |
 
 Read only the file you need. Do not load all of them by reflex.
