@@ -93,6 +93,25 @@ server's day boundary is what matters for a daily limit, and its GMT offset
 differs by broker and shifts with daylight saving. Never use `TimeLocal()` for
 this.
 
+**Weekend pitfall.** `TimeCurrent()` is the time of the *last tick*, not the
+current time. While the market is closed it stays frozen on Friday night, so a
+"today" count run on a Saturday or Sunday (for example in `OnInit` when the EA
+is attached) counts Friday's deals. This happened to OrbLondon. On a Sunday
+attach it reported "1 entry(ies) already today" because of Friday's trade. For
+"now" outside the tester, use `TimeTradeServer()`, which the terminal computes
+from the local clock and keeps running. Also check each deal's own `DEAL_TIME`
+against the target day:
+
+```cpp
+datetime ServerNow()
+{
+   if(MQLInfoInteger(MQL_TESTER))
+      return(TimeCurrent());            // simulated clock in the tester
+   datetime live = TimeTradeServer();
+   return(live > TimeCurrent() ? live : TimeCurrent());
+}
+```
+
 ---
 
 ## Trade result codes

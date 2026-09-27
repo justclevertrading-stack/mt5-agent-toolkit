@@ -1242,13 +1242,18 @@ int CountMyPendingOrders(const long magic)
 //|                                                                   |
 //| Counted per magic number, which is what keeps the two sessions    |
 //| independent: a London trade never uses up New York's one entry.   |
+//|                                                                   |
+//| "Now" is ServerNow(), not TimeCurrent(). TimeCurrent() is the     |
+//| time of the last tick, so over a weekend it stays on Friday night |
+//| and Friday's entry was counted as today's on a Sunday attach.     |
 //+------------------------------------------------------------------+
 int CountMyEntriesToday(const long magic)
 {
-   datetime now      = TimeCurrent();
-   datetime dayStart = now - (ServerToUk(now) - UkDayOf(ServerToUk(now)));
+   datetime now      = ServerNow();
+   datetime ukToday  = UkDayOf(ServerToUk(now));
+   datetime dayStart = now - (ServerToUk(now) - ukToday);
 
-   if(!HistorySelect(dayStart, now))
+   if(!HistorySelect(dayStart, now + 60))
       return(0);
 
    int count = 0;
@@ -1259,10 +1264,28 @@ int CountMyEntriesToday(const long magic)
       if(ticket == 0) continue;
       if(HistoryDealGetInteger(ticket, DEAL_MAGIC)  != magic)   continue;
       if(HistoryDealGetString(ticket, DEAL_SYMBOL)  != _Symbol) continue;
-      if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  == DEAL_ENTRY_IN)
-         count++;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  != DEAL_ENTRY_IN) continue;
+      // Belt and braces: the deal itself must fall on the current UK day.
+      datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(UkDayOf(ServerToUk(dealTime)) != ukToday) continue;
+      count++;
    }
    return(count);
+}
+
+//+------------------------------------------------------------------+
+//| The current server time, also when the market is closed.          |
+//|                                                                   |
+//| TimeTradeServer() is computed from the local clock and the        |
+//| server's offset, so it keeps running over a weekend. In the       |
+//| Strategy Tester TimeCurrent() is the simulated clock and is used. |
+//+------------------------------------------------------------------+
+datetime ServerNow()
+{
+   if(MQLInfoInteger(MQL_TESTER))
+      return(TimeCurrent());
+   datetime live = TimeTradeServer();
+   return(live > TimeCurrent() ? live : TimeCurrent());
 }
 
 //+------------------------------------------------------------------+
