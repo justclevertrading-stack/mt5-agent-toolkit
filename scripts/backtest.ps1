@@ -75,6 +75,20 @@
        the NEXT run rather than the one that caused it. This script waits
        for the process to disappear before returning.
 
+   10. A PENDING TERMINAL UPDATE EATS THE RUN, SILENTLY.
+       When MetaTrader has downloaded a new build, a start with /config:
+       hands the command line to liveupdate\terminal64.exe /update instead
+       of running the test. Installing into C:\Program Files needs Windows
+       elevation, so a UAC prompt appears; until someone answers it the
+       updater sits there, the tester never starts, no report is written
+       and nothing is logged under Tester\logs. The failure is
+       indistinguishable from a bad symbol or missing history, and it
+       repeats on every fresh start, so retrying cannot clear it.
+       Confirmed 2026-09-27, build 6182 with 6230 staged: four runs lost
+       this way. The only fix is to let the update install, by answering
+       the UAC prompt or starting MetaTrader once as administrator.
+       This script reads the terminal log and says so by name.
+
 .PARAMETER Expert
     EA path relative to MQL5\Experts, including the .ex5 extension.
     Example: Advisors\MyEA.ex5
@@ -273,6 +287,27 @@ while ((Get-Date) -lt $lingerDeadline) {
 }
 
 if (-not (Test-Path -LiteralPath $reportInData)) {
+    # A pending terminal update pre-empts the test entirely. See note 10.
+    # Name it, rather than blaming the symbol or the history.
+    $terminalLog = Join-Path $DataFolder ('logs\' + (Get-Date -Format 'yyyyMMdd') + '.log')
+    if (Test-Path -LiteralPath $terminalLog) {
+        $tail = Get-Content -LiteralPath $terminalLog -Encoding Unicode -Tail 40 -ErrorAction SilentlyContinue
+        if (@($tail | Where-Object { $_ -match 'LiveUpdate\s+start' }).Count -gt 0) {
+            throw @"
+MetaTrader handed this run to its own updater instead of testing.
+
+$terminalLog ends with a "LiveUpdate start ... /update" line, which means a new
+build is downloaded and waiting to install. Installing into the MetaTrader
+program folder needs Windows elevation, so a UAC prompt is now open, or was
+dismissed. Until the update is installed every scripted start is consumed the
+same way and no report is ever written. Retrying will not help.
+
+Install it: answer the UAC prompt, or close MetaTrader and start it once with
+Run as administrator. Then run this again.
+"@
+        }
+    }
+
     $hint = "No report at $reportInData. Check $DataFolder\Tester\logs for the reason. " +
             "The usual causes are a wrong symbol name (check the broker's suffix), " +
             "an account that is not logged in, or a date range with no history."

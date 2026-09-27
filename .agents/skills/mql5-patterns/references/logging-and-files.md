@@ -116,3 +116,44 @@ rResult = totalRealisedMoney / moneyRiskedAtEntry;   // 1.5R half + 3R half = 2.
 ```
 
 **Recorded:** 2026-09-23
+
+## Splitting a result by session, which the report cannot do
+
+Re-verified 2026-09-27 on `OrbLondon` with a London and a New York box, build
+6230. Fourteen runs, every CSV's net equal to its report's net to the cent.
+
+The HTML report gives one net profit for the run. With two sessions in one
+binary the question is immediately "which of them earned it", and the report
+cannot answer, because both sessions trade the same symbol. A `session` column
+answers it from the same file that already proves it agrees with the report:
+
+```
+date,time_uk,session,mode,direction,box_low,box_high,box_height,entry,stop,
+r_at_stop,retest,outcome,r_result,minutes_in_trade,profit_usd,reason
+```
+
+```powershell
+$traded = Import-Csv $csv | Where-Object { $_.outcome -notlike 'SKIPPED*' }
+$traded | Group-Object session | ForEach-Object {
+    "{0}: {1} positions, net {2:N2}" -f $_.Name, $_.Count,
+        ($_.Group | Measure-Object profit_usd -Sum).Sum
+}
+```
+
+Two details that make the file trustworthy rather than merely present:
+
+- **One set of held-row slots per session**, not one per EA. A single
+  "record being filled in" index cannot hold two open trades at once, and the
+  second session's row silently overwrites the first's. Keep the tracking state
+  in an array indexed by session.
+- **Adopt a position that has no row.** After a restart the position exists and
+  its row does not. Rebuild the row from the position and from the box
+  recomputed out of bars, rather than dropping the trade from the log.
+
+The same file is what makes a "wait for the retest" variant measurable at all.
+Log the row when the break is detected, not when the order fills, and a
+`retest` column of `Y` or `N` then gives the fill rate and the win rate of the
+filled subset against the plain-break run: 67% of breaks filled, and those won
+10 percentage points less often than taking every break.
+
+**Recorded:** 2026-09-27

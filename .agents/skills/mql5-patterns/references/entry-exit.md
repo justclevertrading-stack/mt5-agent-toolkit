@@ -307,3 +307,61 @@ and its recovery factor is slightly worse.
 Neither of those profit factors is far enough above 1.0 to survive commission
 and slippage. The point of the table is the mechanical difference between the
 two rules, not either result.
+
+---
+
+## A pending limit that must die after N candles
+
+Verified 2026-09-27, build 6230, `OrbLondon` RETEST mode on XAUUSD M5. Six runs,
+311 limit orders placed, 218 filled, 93 cancelled, every cancel for a reason the
+journal names.
+
+Place it GTC and expire it yourself. `ORDER_TIME_SPECIFIED` needs the broker to
+allow an expiry on that symbol, and it can only count seconds, while the rule is
+almost always written in candles:
+
+```cpp
+bool ok = isBuy ? trade.BuyLimit (lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpComment)
+                : trade.SellLimit(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, InpComment);
+uint code = trade.ResultRetcode();
+if(ok && (code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_PLACED))  // PLACED, not just DONE
+```
+
+`TRADE_RETCODE_PLACED` is the success code for a pending order. Checking only
+for `DONE` reports every correctly placed limit as a rejection.
+
+Count the candles from the order's own setup time, floored to the bar grid, and
+compare against the bar that is forming. No counter, no global, so an order
+placed before a restart is still expired on time:
+
+```cpp
+int      barSeconds = PeriodSeconds(WORK_TF);
+datetime setup      = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+datetime setupBar   = (datetime)((long)setup - ((long)setup % barSeconds));
+if((long)iTime(_Symbol, WORK_TF, 0) >= (long)setupBar + (long)InpRetestBars * barSeconds)
+   trade.OrderDelete(ticket);       // lived through exactly InpRetestBars candles
+```
+
+Every other cancel test should also be recomputed rather than remembered. The
+level the order is waiting at came from somewhere, a box, a swing, a gap, and
+that somewhere can be rebuilt from bars, so "cancel if price closed back inside
+the box" needs no stored state either.
+
+Two results worth knowing before writing a retest rule:
+
+- **A fill beats a cancel.** The fill happens on a tick inside the candle; a
+  close-based cancel test only runs once that candle has closed. In 311 orders
+  the close-back-inside test never fired once, because price cannot close back
+  through the level without trading at it.
+- **Bars are bid, a buy limit fills on the ask.** A buy limit at a level formed
+  by bar highs needs the bid to fall a spread's width below that level before it
+  fills. This is also why a limit placed at the level price has just broken is
+  sometimes refused outright: by the time the order goes out, the ask is already
+  within the stops level of it. That was 2 to 13 orders per run, logged rather
+  than silently dropped:
+
+```cpp
+if(isBuy && entry > ask - minGap)   // no room left, the retest already happened
+```
+
+**Recorded:** 2026-09-27

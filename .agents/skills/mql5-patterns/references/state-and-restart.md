@@ -145,3 +145,52 @@ a rejecting broker is how an EA generates hundreds of requests in a minute.
 Prefer rebuilding from the account. If a value truly cannot be derived, write
 it to a file in `MQL5\Files\` or use `GlobalVariableSet`, and still treat the
 account as the source of truth in `OnInit`.
+
+## One magic number per session, when sessions must not block each other
+
+Verified 2026-09-27, build 6230, `OrbLondon` trading a London and a New York
+box on XAUUSD M5.
+
+"One trade per session" and "one position at a time" are almost always written
+as a single cap over the whole EA. As soon as there are two sessions, that cap
+silently couples them: the London trade consumes the day's entry, or is still
+open when the New York box breaks, and the second session never trades. The
+symptom is a two-session EA that produces exactly the one-session results.
+
+Give each session its own magic number and make every count take one:
+
+```cpp
+long SessionMagic(const int s) { return(s == SESSION_NY ? InpMagic + InpNyMagicOffset : InpMagic); }
+
+int SessionOfMagic(const long magic)          // which session a position belongs to
+{
+   if(magic == InpMagic)                    return(SESSION_LON);
+   if(magic == InpMagic + InpNyMagicOffset) return(SESSION_NY);
+   return(-1);                               // not ours
+}
+
+int CountMyPositions(const long magic)    { ... PositionGetInteger(POSITION_MAGIC) == magic ... }
+int CountMyEntriesToday(const long magic) { ... HistoryDealGetInteger(t, DEAL_MAGIC) == magic ... }
+```
+
+The cap is then per session and still read from the account, so it survives a
+restart exactly as the single-session version did. It also separates the two in
+the History tab and in any per-trade log, which is the only way to answer "which
+session made the money".
+
+Two things to check before shipping it:
+
+- **Netting versus hedging.** Two positions on one symbol only coexist on a
+  hedging account. On netting the server merges them into one net position
+  whatever the magic numbers say, and the second entry partly closes the first.
+  Read `ACCOUNT_MARGIN_MODE` in `OnInit` and say so in the journal.
+- **Refuse an entry at or after that session's own flatten time.** A session
+  whose last-entry time equals its flatten time will otherwise open a position
+  on the candle that closes at the flat and close it in the same second. Three
+  such trades appeared in a first run and disappeared with a one-line guard.
+
+To prove the sessions really are independent, run each alone and then together
+and compare the per-session trade counts: 72 London and 105 New York alone, 72
+and 105 together, with 43 days holding one of each.
+
+**Recorded:** 2026-09-27
