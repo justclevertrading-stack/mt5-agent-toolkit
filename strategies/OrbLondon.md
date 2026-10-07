@@ -337,6 +337,15 @@ single-session runs; "Both" is the two-session run. Reports and CSVs are
 | E | | 2024 | = D | 95 / 50.53 / 1.03 / +89.95 | 108 / 1.07 / +255.22 / 8.11% |
 | F | `InpTp2RangeMult=1.5` | 2025 | 72 / 52.78 / 0.94 / -188.17 | 105 / 56.19 / 1.14 / +534.33 | 177 / 1.05 / +385.01 / 10.06% |
 | F | | 2024 | 17 / 52.94 / 1.13 / +98.37 | 109 / 49.54 / 1.04 / +123.65 | 126 / 1.04 / +163.90 / 10.90% |
+| G | `InpFirstBreakOnly=false` | 2025 | 86 / 55.81 / 1.02 / +61.64 | 126 / 53.17 / 0.90 / -469.48 | 212 / 0.95 / -422.80 / 17.61% |
+| G | | 2024 | 20 / 45.00 / 0.64 / -379.06 | 120 / 52.50 / 1.05 / +176.85 | 140 / 0.97 / -154.83 / 13.87% |
+| H | E + F | 2025 | 55 / 50.91 / 0.88 / -320.65 | 109 / 55.05 / 1.13 / +499.28 | 164 / 1.01 / +89.96 / 11.29% |
+| H | | 2024 | 13 / 61.54 / 1.18 / +85.20 | 95 / 50.53 / 1.03 / +91.83 | 108 / 1.05 / +188.35 / 8.05% |
+| I | D + F | 2025 | 55 / 50.91 / 0.88 / -320.65 | 79 / 56.96 / 1.23 / +528.89 | 134 / 1.04 / +182.36 / 7.45% |
+| I | | 2024 | 13 / 61.54 / 1.18 / +85.20 | 83 / 46.99 / 1.00 / +2.39 | 96 / 1.03 / +97.85 / 7.94% |
+
+Version 1.12 moved the first-break test ahead of the EMA test for the journal's
+sake. Re-running A on 1.12 gave CSVs byte-identical to 1.11 in all six runs.
 
 Every one of the 20 largest losses in every variant and period is a single
 full stop, -0.90 to -1.06 R. No loss exceeds the 1% risk by more than spread
@@ -345,8 +354,11 @@ and slippage, so the variants differ in how often they lose, not in how much.
 The 2026-10-07 live NY session, long side rejected by the EMA at 14:05 UK and
 then silent from 15:25 when the EMAs crossed, is this spec's first-break rule
 working as written: the EMA-rejected 14:00 candle was the first close above,
-so the long side was finished. The "No trade" lines for 14:15 to 15:20 blame
-the EMA only because the EMA test runs before the first-break test.
+so the long side was finished. The "No trade" lines for 14:15 to 15:20 blamed
+the EMA only because the EMA test ran before the first-break test. Since 1.12
+the first-break test runs first and logs "long side finished" once per side
+per session, so that day would now read one EMA rejection at 14:05 followed by
+one "side finished" line at 14:15.
 
 ## Logging
 

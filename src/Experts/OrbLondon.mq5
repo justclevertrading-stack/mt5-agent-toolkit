@@ -34,7 +34,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.11"
+#property version   "1.12"
 #property description "London and New York opening range breakout, XAUUSD M5."
 
 #include <Trade\Trade.mqh>
@@ -207,6 +207,8 @@ struct SessionState
    datetime openTime;
    double   risk;           // money at risk when the position opened
    string   exitTag;        // set immediately before a close this EA decides
+   datetime longFinishedDay;   // UK day the "long side finished" line was logged
+   datetime shortFinishedDay;  // UK day the "short side finished" line was logged
 };
 
 SessionState sess[SESSION_COUNT];
@@ -307,9 +309,13 @@ bool ComputeSessionBox(const int s, const datetime ukDay, double &hi, double &lo
 //--- True when no earlier candle in this session already closed beyond this
 //--- side of the box. Read from bars, so a restart cannot forget a break.
 //--- breakBar is the index of the candle being judged; only older ones are read.
+//--- firstUk receives the UK open time of the session's first close beyond,
+//--- for the log, or 0 when there is none.
 bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool above,
-                        const double hi, const double lo, const int breakBar)
+                        const double hi, const double lo, const int breakBar,
+                        datetime &firstUk)
 {
+   firstUk = 0;
    for(int i = breakBar + 1; i <= SCAN_BARS; i++)
    {
       datetime barTime = iTime(_Symbol, WORK_TF, i);
@@ -325,10 +331,33 @@ bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool
       double c = iClose(_Symbol, WORK_TF, i);
       if(c <= 0.0)
          continue;
-      if(above && c > hi) return(false);
-      if(!above && c < lo) return(false);
+      if((above && c > hi) || (!above && c < lo))
+         firstUk = uk;                        // walking back, so the last hit is the first
    }
-   return(true);
+   return(firstUk == 0);
+}
+
+//--- InpFirstBreakOnly: an earlier candle already closed beyond this side, so
+//--- the side is finished. Said once per side per session, because every
+//--- later candle beyond it fails the same way and the log should not repeat it.
+void LogSideFinished(const int s, const datetime ukDay, const int dir,
+                     const datetime firstUk, const double edge)
+{
+   if(dir > 0)
+   {
+      if(sess[s].longFinishedDay == ukDay) return;
+      sess[s].longFinishedDay = ukDay;
+   }
+   else
+   {
+      if(sess[s].shortFinishedDay == ukDay) return;
+      sess[s].shortFinishedDay = ukDay;
+   }
+   PrintFormat("%s %s: %s side finished for the session. The first close %s range %s %.*f "
+               "was the candle opening %s UK, and only the first break is taken.",
+               InpComment, SessionTag(s), (dir > 0 ? "long" : "short"),
+               (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
+               _Digits, edge, TimeToString(firstUk, TIME_MINUTES));
 }
 
 //--- The trend filter this session uses.
@@ -475,13 +504,21 @@ bool DetectSignal(const int s)
    if(close <= 0.0)
       return(false);
 
-   bool emaOn = (EmaFilterOf(s) != NY_EMA_OFF);
+   bool     emaOn   = (EmaFilterOf(s) != NY_EMA_OFF);
+   datetime firstUk = 0;
 
+   // The first-break test runs before the EMA test. It is the gate that ends
+   // a side for good, so when it fails the log must say so, not report an
+   // EMA disagreement that no longer matters. Either order takes the same
+   // trades; only the journal differs.
    if(close > hi)
    {
-      if(!EmaAgrees(s, 1, breakBar, close, hi, lo))
+      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, true, hi, lo, breakBar, firstUk))
+      {
+         LogSideFinished(s, ukDay, 1, firstUk, hi);
          return(false);
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, true, hi, lo, breakBar))
+      }
+      if(!EmaAgrees(s, 1, breakBar, close, hi, lo))
          return(false);
       if(InpBreakMustHold && !BreakHeld(s, 1, hi, lo))
          return(false);
@@ -498,9 +535,12 @@ bool DetectSignal(const int s)
    }
    else if(close < lo)
    {
-      if(!EmaAgrees(s, -1, breakBar, close, hi, lo))
+      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo, breakBar, firstUk))
+      {
+         LogSideFinished(s, ukDay, -1, firstUk, lo);
          return(false);
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo, breakBar))
+      }
+      if(!EmaAgrees(s, -1, breakBar, close, hi, lo))
          return(false);
       if(InpBreakMustHold && !BreakHeld(s, -1, hi, lo))
          return(false);
@@ -706,6 +746,8 @@ int OnInit()
       sess[s].openTime      = 0;
       sess[s].risk          = 0.0;
       sess[s].exitTag       = "";
+      sess[s].longFinishedDay  = 0;
+      sess[s].shortFinishedDay = 0;
    }
 
    LogBrokerCapabilities();
