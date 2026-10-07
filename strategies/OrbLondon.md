@@ -178,6 +178,8 @@ between runs. Baseline is every one of them at its default.
 | `InpEntryMode` | `BREAK` | `RETEST`: limit at the broken box edge instead of a market order |
 | `InpRetestBars` | 6 | Candles a RETEST limit is given to fill |
 | `InpCloseBackInsideExit` | false | true: close an open position when a candle closes back inside its box. **New behaviour.** The build before 2026-09-27 had no such exit, which is why the default is off: turning it on invalidates every earlier result |
+| `InpNyEmaFilter` | `NY_EMA_CROSS` | New York only. `NY_EMA_OFF` (1): no trend filter in New York. `NY_EMA_SLOPE` (2): EMA9 rose on each of the last three bars for a long (fell, for a short), no cross needed; read on the break candle. London keeps the cross. `InpUseEmaFilter = false` still turns both off |
+| `InpBreakMustHold` | false | true: the first close beyond a side is only taken if the next candle also closes beyond it; entry on that second close. The EMA filter is still read on the break candle, so the trades are a subset of the default ones. A break that does not hold finishes that side for the session. Both sessions |
 
 Measured XAUUSD M5, 2025.01.01 to 2025.09.12, model 1, 100% history quality,
 1% risk, $10,000, commission 0. Statistics are per position: MT5 counts each
@@ -312,6 +314,39 @@ range on gold was mostly $2 to $4 at 2024 prices; only 21 sessions reached
 $5. The percent filter (H) admitted 35 positions from the same year. A range
 filter in dollars is therefore a filter on the price level as much as on the
 range, and the two years are not comparable under it.
+
+### NY filter, break-must-hold and TP2 variants, measured 2026-10-07
+
+Same conditions as the 2026-09-27 table: XAUUSD M5, model 1, build 6230, 1%,
+$10,000, BREAK mode, 2025 = 2025.01.01-09.26. A is the default inputs and
+reproduces every 2026-09-27 BREAK row to the cent. London and NY are their own
+single-session runs; "Both" is the two-session run. Reports and CSVs are
+`reports\orbny-20261007-<variant>-<london|ny|both>-<2025|2024>.*`.
+
+| Var | Inputs | Period | London n / win% / PF / net | NY n / win% / PF / net | Both n / PF / net / max DD |
+|---|---|---|---|---|---|
+| A | defaults | 2025 | 72 / 52.78 / 0.97 / -97.43 | 105 / 56.19 / 1.08 / +296.81 | 177 / 1.03 / +201.46 / 11.08% |
+| A | | 2024 | 17 / 52.94 / 1.00 / +0.34 | 109 / 49.54 / 1.01 / +38.07 | 126 / 1.00 / +12.47 / 10.78% |
+| B | `InpNyEmaFilter=1` | 2025 | = A | 126 / 55.56 / 0.98 / -76.01 | 198 / 0.98 / -154.74 / 16.57% |
+| B | | 2024 | = A | 122 / 50.00 / 1.03 / +115.39 | 139 / 1.02 / +80.06 / 12.70% |
+| C | `InpNyEmaFilter=2` | 2025 | = A | 105 / 51.43 / 0.87 / -502.37 | 177 / 0.91 / -650.24 / 18.15% |
+| C | | 2024 | = A | 100 / 47.00 / 0.99 / -43.21 | 117 / 0.98 / -71.87 / 11.00% |
+| D | `InpBreakMustHold=true` | 2025 | 55 / 50.91 / 0.92 / -217.40 | 79 / 56.96 / 1.23 / +519.39 | 134 / 1.06 / +287.31 / 8.07% |
+| D | | 2024 | 13 / 61.54 / 1.37 / +173.47 | 83 / 46.99 / 1.00 / -1.15 | 96 / 1.06 / +186.98 / 8.21% |
+| E | D + B | 2025 | = D | 109 / 55.05 / 1.16 / +584.16 | 164 / 1.04 / +274.53 / 9.99% |
+| E | | 2024 | = D | 95 / 50.53 / 1.03 / +89.95 | 108 / 1.07 / +255.22 / 8.11% |
+| F | `InpTp2RangeMult=1.5` | 2025 | 72 / 52.78 / 0.94 / -188.17 | 105 / 56.19 / 1.14 / +534.33 | 177 / 1.05 / +385.01 / 10.06% |
+| F | | 2024 | 17 / 52.94 / 1.13 / +98.37 | 109 / 49.54 / 1.04 / +123.65 | 126 / 1.04 / +163.90 / 10.90% |
+
+Every one of the 20 largest losses in every variant and period is a single
+full stop, -0.90 to -1.06 R. No loss exceeds the 1% risk by more than spread
+and slippage, so the variants differ in how often they lose, not in how much.
+
+The 2026-10-07 live NY session, long side rejected by the EMA at 14:05 UK and
+then silent from 15:25 when the EMAs crossed, is this spec's first-break rule
+working as written: the EMA-rejected 14:00 candle was the first close above,
+so the long side was finished. The "No trade" lines for 14:15 to 15:20 blame
+the EMA only because the EMA test runs before the first-break test.
 
 ## Logging
 

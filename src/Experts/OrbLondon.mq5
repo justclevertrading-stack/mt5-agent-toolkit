@@ -34,7 +34,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.10"
+#property version   "1.11"
 #property description "London and New York opening range breakout, XAUUSD M5."
 
 #include <Trade\Trade.mqh>
@@ -46,6 +46,18 @@ enum ENUM_ENTRY_MODE
 {
    ENTRY_BREAK  = 0,    // BREAK: market order on the close outside the box
    ENTRY_RETEST = 1     // RETEST: limit order at the broken box edge
+};
+
+//+------------------------------------------------------------------+
+//| New York trend filter. London always uses the EMA9/EMA21 cross    |
+//| when InpUseEmaFilter is on; InpUseEmaFilter = false turns the     |
+//| filter off for both sessions whatever this says.                  |
+//+------------------------------------------------------------------+
+enum ENUM_NY_EMA_FILTER
+{
+   NY_EMA_CROSS = 0,    // CROSS: EMA9 above EMA21 for a long, below for a short
+   NY_EMA_OFF   = 1,    // OFF: no trend filter in New York
+   NY_EMA_SLOPE = 2     // SLOPE: EMA9 rose (fell) on each of the last 3 bars
 };
 
 //+------------------------------------------------------------------+
@@ -108,6 +120,13 @@ input double InpMaxRangePct      = 0.60;    // Skip above this, % of the range m
 // turning it on changes every result that came before it. When on it applies
 // to both sessions alike.
 input bool   InpCloseBackInsideExit = false; // Exit when a candle closes back inside the box
+input ENUM_NY_EMA_FILTER InpNyEmaFilter = NY_EMA_CROSS; // New York trend filter
+// When on, the first close beyond the box is only taken if the NEXT candle
+// also closes beyond the same side; the entry is on that second close. The
+// EMA filter is still read on the break candle itself, so the trades taken
+// are a subset of the default ones. A break that does not hold finishes that
+// side for the session, as an EMA rejection does. Both sessions alike.
+input bool   InpBreakMustHold    = false;   // Require the candle after the break to close outside too
 
 input group "=== Risk management ===";
 input double InpRiskPercent      = 1.0;     // Risk per trade, % of balance
@@ -149,6 +168,9 @@ bool     isHedging   = false;
 // Indicator values for the last closed bars.
 // Index 1 is the most recently closed bar, index 2 the one before it.
 // Index 0 is the bar still forming and is deliberately not used.
+// Six are loaded: the SLOPE filter on a break-must-hold signal reads the
+// break candle at index 2 and the three bars before it, down to index 5.
+#define EMA_BARS       6
 double   fastMA[];
 double   slowMA[];
 
@@ -284,10 +306,11 @@ bool ComputeSessionBox(const int s, const datetime ukDay, double &hi, double &lo
 
 //--- True when no earlier candle in this session already closed beyond this
 //--- side of the box. Read from bars, so a restart cannot forget a break.
+//--- breakBar is the index of the candle being judged; only older ones are read.
 bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool above,
-                        const double hi, const double lo)
+                        const double hi, const double lo, const int breakBar)
 {
-   for(int i = 2; i <= SCAN_BARS; i++)        // from index 2: skip the signal bar
+   for(int i = breakBar + 1; i <= SCAN_BARS; i++)
    {
       datetime barTime = iTime(_Symbol, WORK_TF, i);
       if(barTime <= 0)
@@ -306,6 +329,74 @@ bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool
       if(!above && c < lo) return(false);
    }
    return(true);
+}
+
+//--- The trend filter this session uses.
+ENUM_NY_EMA_FILTER EmaFilterOf(const int s)
+{
+   if(!InpUseEmaFilter)
+      return(NY_EMA_OFF);
+   return(s == SESSION_NY ? InpNyEmaFilter : NY_EMA_CROSS);
+}
+
+//--- Does the trend filter agree with a break in direction dir, read on the
+//--- candle at index bar? Prints the reason when it does not.
+bool EmaAgrees(const int s, const int dir, const int bar, const double close,
+               const double hi, const double lo)
+{
+   ENUM_NY_EMA_FILTER filter = EmaFilterOf(s);
+   if(filter == NY_EMA_OFF)
+      return(true);
+
+   if(filter == NY_EMA_SLOPE)
+   {
+      bool rising  = fastMA[bar] > fastMA[bar + 1] && fastMA[bar + 1] > fastMA[bar + 2] &&
+                     fastMA[bar + 2] > fastMA[bar + 3];
+      bool falling = fastMA[bar] < fastMA[bar + 1] && fastMA[bar + 1] < fastMA[bar + 2] &&
+                     fastMA[bar + 2] < fastMA[bar + 3];
+      if((dir > 0 && rising) || (dir < 0 && falling))
+         return(true);
+      PrintFormat("%s %s: close %.*f %s range %s %.*f but %s EMA%d %.*f, %.*f, %.*f, %.*f is not %s. No trade.",
+                  InpComment, SessionTag(s), _Digits, close,
+                  (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
+                  _Digits, (dir > 0 ? hi : lo),
+                  EnumToString(InpEmaTimeframe), InpFastEmaPeriod,
+                  _Digits, fastMA[bar + 3], _Digits, fastMA[bar + 2],
+                  _Digits, fastMA[bar + 1], _Digits, fastMA[bar],
+                  (dir > 0 ? "rising" : "falling"));
+      return(false);
+   }
+
+   if(dir > 0 && fastMA[bar] <= slowMA[bar])
+   {
+      PrintFormat("%s %s: close %.*f above range high %.*f but %s EMA%d %.*f is not above EMA%d %.*f. No trade.",
+                  InpComment, SessionTag(s), _Digits, close, _Digits, hi,
+                  EnumToString(InpEmaTimeframe),
+                  InpFastEmaPeriod, _Digits, fastMA[bar],
+                  InpSlowEmaPeriod, _Digits, slowMA[bar]);
+      return(false);
+   }
+   if(dir < 0 && fastMA[bar] >= slowMA[bar])
+   {
+      PrintFormat("%s %s: close %.*f below range low %.*f but %s EMA%d %.*f is not below EMA%d %.*f. No trade.",
+                  InpComment, SessionTag(s), _Digits, close, _Digits, lo,
+                  EnumToString(InpEmaTimeframe),
+                  InpFastEmaPeriod, _Digits, fastMA[bar],
+                  InpSlowEmaPeriod, _Digits, slowMA[bar]);
+      return(false);
+   }
+   return(true);
+}
+
+//--- InpBreakMustHold: did the candle after the break also close beyond?
+bool BreakHeld(const int s, const int dir, const double hi, const double lo)
+{
+   double next = iClose(_Symbol, WORK_TF, 1);
+   bool held = (dir > 0) ? (next > hi) : (next < lo);
+   if(!held)
+      PrintFormat("%s %s: break %s the range did not hold, next close %.*f is back inside. No trade.",
+                  InpComment, SessionTag(s), (dir > 0 ? "above" : "below"), _Digits, next);
+   return(held);
 }
 
 //--- Look at the bar that has just closed and decide what to do for this
@@ -369,22 +460,30 @@ bool DetectSignal(const int s)
                                             _Digits, lo, _Digits, hi, span));
    }
 
-   double close = iClose(_Symbol, WORK_TF, 1);
+   // The candle judged as the break. With InpBreakMustHold it is the one
+   // before the candle that has just closed, which must itself be after the
+   // box on the same UK day.
+   int breakBar = InpBreakMustHold ? 2 : 1;
+   if(InpBreakMustHold)
+   {
+      datetime breakUk = ServerToUk(iTime(_Symbol, WORK_TF, breakBar));
+      if(UkDayOf(breakUk) != ukDay || UkMinuteOfDay(breakUk) < boxEnd)
+         return(false);
+   }
+
+   double close = iClose(_Symbol, WORK_TF, breakBar);
    if(close <= 0.0)
       return(false);
 
+   bool emaOn = (EmaFilterOf(s) != NY_EMA_OFF);
+
    if(close > hi)
    {
-      if(InpUseEmaFilter && fastMA[1] <= slowMA[1])
-      {
-         PrintFormat("%s %s: close %.*f above range high %.*f but %s EMA%d %.*f is not above EMA%d %.*f. No trade.",
-                     InpComment, SessionTag(s), _Digits, close, _Digits, hi,
-                     EnumToString(InpEmaTimeframe),
-                     InpFastEmaPeriod, _Digits, fastMA[1],
-                     InpSlowEmaPeriod, _Digits, slowMA[1]);
+      if(!EmaAgrees(s, 1, breakBar, close, hi, lo))
          return(false);
-      }
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, true, hi, lo))
+      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, true, hi, lo, breakBar))
+         return(false);
+      if(InpBreakMustHold && !BreakHeld(s, 1, hi, lo))
          return(false);
 
       signalDir  = 1;
@@ -394,21 +493,16 @@ bool DetectSignal(const int s)
       signalLo   = lo;
       signalWhy  = StringFormat("close %.*f above range high %.*f%s, stop at the %s",
                                 _Digits, close, _Digits, hi,
-                                (InpUseEmaFilter ? ", EMA agrees" : ""),
+                                (emaOn ? ", EMA agrees" : ""),
                                 (InpStopAtMidpoint ? "midpoint" : "far side"));
    }
    else if(close < lo)
    {
-      if(InpUseEmaFilter && fastMA[1] >= slowMA[1])
-      {
-         PrintFormat("%s %s: close %.*f below range low %.*f but %s EMA%d %.*f is not below EMA%d %.*f. No trade.",
-                     InpComment, SessionTag(s), _Digits, close, _Digits, lo,
-                     EnumToString(InpEmaTimeframe),
-                     InpFastEmaPeriod, _Digits, fastMA[1],
-                     InpSlowEmaPeriod, _Digits, slowMA[1]);
+      if(!EmaAgrees(s, -1, breakBar, close, hi, lo))
          return(false);
-      }
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo))
+      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo, breakBar))
+         return(false);
+      if(InpBreakMustHold && !BreakHeld(s, -1, hi, lo))
          return(false);
 
       signalDir  = -1;
@@ -418,7 +512,7 @@ bool DetectSignal(const int s)
       signalLo   = lo;
       signalWhy  = StringFormat("close %.*f below range low %.*f%s, stop at the %s",
                                 _Digits, close, _Digits, lo,
-                                (InpUseEmaFilter ? ", EMA agrees" : ""),
+                                (emaOn ? ", EMA agrees" : ""),
                                 (InpStopAtMidpoint ? "midpoint" : "far side"));
    }
 
@@ -717,12 +811,12 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Load the last three indicator values. False means not ready.     |
+//| Load the last EMA_BARS indicator values. False means not ready.  |
 //+------------------------------------------------------------------+
 bool RefreshIndicators()
 {
-   if(CopyBuffer(fastHandle, 0, 0, 3, fastMA) < 3) return(false);
-   if(CopyBuffer(slowHandle, 0, 0, 3, slowMA) < 3) return(false);
+   if(CopyBuffer(fastHandle, 0, 0, EMA_BARS, fastMA) < EMA_BARS) return(false);
+   if(CopyBuffer(slowHandle, 0, 0, EMA_BARS, slowMA) < EMA_BARS) return(false);
    return(true);
 }
 

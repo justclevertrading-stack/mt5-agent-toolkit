@@ -90,6 +90,21 @@ PrintFormat("Setup skipped: buy limit %.*f is not below ask %.*f by the stops le
 Grouping those lines afterwards tells you immediately whether the problem is
 the target rule, the entry price, or the broker's minimum distance.
 
+## A logged gate can hide a silent one behind it
+
+When the signal function tests gates in sequence and only some of them print,
+the log names the first gate that failed, not the one that actually decides.
+Seen live on OrbLondon, 2026-10-07: the EMA test ran before the "first close
+beyond the box" test and printed "EMA not above. No trade." on every bar for
+75 minutes. The first-break gate had already closed the session on the first
+of those bars. When the EMAs crossed, the EMA line stopped and nothing replaced
+it, which looked like the EA had stopped evaluating.
+
+Order the gates from the one that ends the session for good to the one that
+can change bar by bar, and give the session-ending gate a once-per-session log
+line. Then the log says why the session ended, and later bars stay quiet
+because there is nothing left to decide.
+
 ## Change one thing per run
 
 Make every threshold an input, then vary them from the command line rather than
