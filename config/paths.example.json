@@ -5,5 +5,8 @@
   "terminal": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
 
   "_includePathComment": "MQL5 folder that contains Include\\. MetaEditor resolves <Trade\\Trade.mqh> against its own data folder, not against your source folder, so this must be set explicitly. Find it in MetaTrader: File, Open Data Folder.",
-  "includePath": "C:\\Users\\YOURNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\YOURHASH\\MQL5"
+  "includePath": "C:\\Users\\YOURNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\YOURHASH\\MQL5",
+
+  "_portableComment": "Recommended: point terminal, dataFolder and includePath at a second, backtest-only copy of MetaTrader run with /portable (for example C:\\MT5-Backtest, with dataFolder the same folder) and set portable to true. backtest.ps1 then never needs the live terminal closed. See note 11 in scripts\\backtest.ps1.",
+  "portable": false
 }

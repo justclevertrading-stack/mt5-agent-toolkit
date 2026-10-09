@@ -89,6 +89,24 @@
        the UAC prompt or starting MetaTrader once as administrator.
        This script reads the terminal log and says so by name.
 
+   11. RUN BACKTESTS FROM A SECOND, PORTABLE INSTALL, NOT THE LIVE ONE.
+       Note 0 means a test on the live install needs the live terminal
+       closed. Instead copy the program folder (C:\Program Files\MetaTrader 5)
+       to e.g. C:\MT5-Backtest, start it once with /portable so it builds
+       its own MQL5, Config and Bases there, and point terminal, dataFolder
+       and includePath in paths.json at it with "portable": true. Two
+       instances from different folders run side by side; note 0 only
+       bites on the same path.
+       Logging in the copy: a [Common] Login/Password/Server start config
+       alone did NOT connect a never-used portable install (no network
+       lines, tester: "account is not specified"). Copying accounts.dat and
+       servers.dat from the live data folder's Config into the copy's
+       Config did. Copy history from <live data>\Bases\<server>\history
+       with robocopy /R:0 /W:0: the live terminal holds the current
+       year's .hcc open, and robocopy's default is a million 30 s retries.
+       Never copy Profiles: the copy would reopen the live charts and run
+       their EAs on the same account. Confirmed 2026-10-09, build 6230.
+
 .PARAMETER Expert
     EA path relative to MQL5\Experts, including the .ex5 extension.
     Example: Advisors\MyEA.ex5
@@ -131,6 +149,11 @@ param(
     [long]$Login,
     [string]$Server,
 
+    # Start the terminal with /portable, so it uses its own install folder as
+    # the data folder. Needed for a second, backtest-only install that must
+    # never share state with the live terminal. Config key: "portable": true.
+    [switch]$Portable,
+
     [hashtable]$Inputs,
     [int]$TimeoutSeconds = 1800,
     [switch]$Json
@@ -147,6 +170,7 @@ if (Test-Path -LiteralPath $configPath) {
     if (-not $DataFolder -and $cfg.dataFolder) { $DataFolder = $cfg.dataFolder }
     if (-not $Login      -and $cfg.login)      { $Login      = [long]$cfg.login }
     if (-not $Server     -and $cfg.server)     { $Server     = $cfg.server }
+    if (-not $Portable   -and $cfg.portable)   { $Portable   = [switch]$true }
 }
 if (-not $Terminal)   { throw "terminal64.exe path not set. Add 'terminal' to config\paths.json." }
 if (-not $DataFolder) { throw "MT5 data folder not set. Add 'dataFolder' to config\paths.json. Find it in MetaTrader: File, Open Data Folder." }
@@ -266,7 +290,9 @@ $iniPath = Join-Path $env:TEMP "mt5-backtest-$stamp.ini"
 # --- Run. See note 4. --------------------------------------------------------
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$proc = Start-Process -FilePath $Terminal -ArgumentList "/config:`"$iniPath`"" -PassThru
+$termArgs = "/config:`"$iniPath`""
+if ($Portable) { $termArgs = "/portable $termArgs" }
+$proc = Start-Process -FilePath $Terminal -ArgumentList $termArgs -PassThru
 if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
     $proc.Kill()
     throw "Terminal did not exit within $TimeoutSeconds seconds. ShutdownTerminal may have failed."

@@ -34,8 +34,8 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.12"
-#property description "London and New York opening range breakout, XAUUSD M5."
+#property version   "1.13"
+#property description "London and New York opening range breakout, M5. Built on XAUUSD, range filter in points."
 
 #include <Trade\Trade.mqh>
 
@@ -76,7 +76,9 @@ input group "=== Sessions traded ===";
 input bool   InpTradeLondon      = true;    // Trade the London box
 input bool   InpTradeNY          = true;    // Trade the New York box
 input string InpNYStart          = "13:30"; // NY box starts, UK time HH:MM
-input string InpNYEnd            = "13:45"; // NY box ends, UK time HH:MM
+// Empty means InpNYStart + InpRangeMinutes, so moving the start to 14:30 moves
+// the whole 15 minute box with it.
+input string InpNYEnd            = "";      // NY box ends, UK time HH:MM, empty = start + range length
 // The London session stops taking entries at 12:30 UK, four hours before its
 // flatten time. No equivalent cutoff was specified for New York, so the
 // default here is the flatten time itself: any break up to 16:00 UK is taken
@@ -94,8 +96,10 @@ input int    InpServerUtcOffsetSummer = 3;  // Server UTC offset during EU DST
 input group "=== Strategy ===";
 input int    InpFastEmaPeriod    = 9;       // Fast EMA period
 input int    InpSlowEmaPeriod    = 21;      // Slow EMA period
-input double InpMinRangeUsd      = 5.0;     // Skip session below this range height, $
-input double InpMaxRangeUsd      = 25.0;    // Skip session above this range height, $
+// In the symbol's points, so the same inputs work on any instrument. The
+// defaults are $5 to $25 on Vantage XAUUSD, which quotes 2 digits (point 0.01).
+input int    InpMinRangePoints   = 500;     // Skip session below this range height, points
+input int    InpMaxRangePoints   = 2500;    // Skip session above this range height, points
 input bool   InpFirstBreakOnly   = true;    // Only the first close beyond a side counts
 input double InpTp1RangeMult     = 1.0;     // TP1, range heights from entry
 input double InpTp2RangeMult     = 2.0;     // TP2, range heights from entry
@@ -113,7 +117,7 @@ input bool   InpUseEmaFilter     = true;    // Require the EMA to agree with the
 input ENUM_TIMEFRAMES InpEmaTimeframe = PERIOD_M5; // Timeframe the two EMAs are read on
 input bool   InpMoveToBreakEven  = true;    // Move the stop to entry at TP1
 input bool   InpStopAtMidpoint   = false;   // Stop at the range midpoint, not the far side
-input bool   InpRangeFilterPct   = false;   // Filter the range by percent of price, not dollars
+input bool   InpRangeFilterPct   = false;   // Filter the range by percent of price, not points
 input double InpMinRangePct      = 0.15;    // Skip below this, % of the range midpoint
 input double InpMaxRangePct      = 0.60;    // Skip above this, % of the range midpoint
 // Off by default because the build this one replaces had no such exit, and
@@ -470,23 +474,26 @@ bool DetectSignal(const int s)
       double pct = (midpoint > 0.0) ? span / midpoint * 100.0 : 0.0;
       if(pct < InpMinRangePct || pct > InpMaxRangePct)
       {
-         LogSessionOnce(s, ukDay, StringFormat("range %.2f is %.3f%% of %.2f, outside %.2f%% to %.2f%%, session skipped",
-                                               span, pct, midpoint, InpMinRangePct, InpMaxRangePct));
+         LogSessionOnce(s, ukDay, StringFormat("range %.*f is %.3f%% of %.*f, outside %.2f%% to %.2f%%, session skipped",
+                                               _Digits, span, pct, _Digits, midpoint, InpMinRangePct, InpMaxRangePct));
          return(false);
       }
-      LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.2f (%.3f%%)",
-                                            _Digits, lo, _Digits, hi, span, pct));
+      LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.*f (%.3f%%)",
+                                            _Digits, lo, _Digits, hi, _Digits, span, pct));
    }
    else
    {
-      if(span < InpMinRangeUsd || span > InpMaxRangeUsd)
+      // Compared in price, against the bounds converted once, so a 2 digit
+      // XAUUSD sees exactly the $5.00 and $25.00 it saw when these were dollars.
+      int spanPoints = (int)MathRound(span / _Point);
+      if(span < InpMinRangePoints * _Point || span > InpMaxRangePoints * _Point)
       {
-         LogSessionOnce(s, ukDay, StringFormat("range %.2f outside %.2f to %.2f, session skipped",
-                                               span, InpMinRangeUsd, InpMaxRangeUsd));
+         LogSessionOnce(s, ukDay, StringFormat("range %.*f (%d points) outside %d to %d points, session skipped",
+                                               _Digits, span, spanPoints, InpMinRangePoints, InpMaxRangePoints));
          return(false);
       }
-      LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.2f",
-                                            _Digits, lo, _Digits, hi, span));
+      LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.*f (%d points)",
+                                            _Digits, lo, _Digits, hi, _Digits, span, spanPoints));
    }
 
    // The candle judged as the break. With InpBreakMustHold it is the one
@@ -653,7 +660,7 @@ int OnInit()
       Print("InpFastEmaPeriod must be smaller than InpSlowEmaPeriod.");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   if(InpMinRangeUsd <= 0.0 || InpMaxRangeUsd < InpMinRangeUsd)
+   if(InpMinRangePoints <= 0 || InpMaxRangePoints < InpMinRangePoints)
    {
       Print("Range height bounds are inconsistent.");
       return(INIT_PARAMETERS_INCORRECT);
@@ -695,12 +702,22 @@ int OnInit()
          Print("InpNyMagicOffset must not be zero: the two sessions would share one magic number.");
          return(INIT_PARAMETERS_INCORRECT);
       }
-      if(!ParseUkTime(InpNYStart, nyBoxStart) || !ParseUkTime(InpNYEnd, nyBoxEnd) ||
+      string nyEndText = InpNYEnd;
+      StringTrimLeft(nyEndText);
+      StringTrimRight(nyEndText);
+      bool nyEndOk = true;
+      if(StringLen(nyEndText) == 0)
+         nyBoxEnd = 0;                         // set from the start below
+      else
+         nyEndOk = ParseUkTime(nyEndText, nyBoxEnd);
+      if(!ParseUkTime(InpNYStart, nyBoxStart) || !nyEndOk ||
          !ParseUkTime(InpNYLastEntry, nyLastEntry) || !ParseUkTime(InpNYFlatTime, nyFlatten))
       {
-         Print("InpNYStart, InpNYEnd, InpNYLastEntry and InpNYFlatTime must all read HH:MM.");
+         Print("InpNYStart, InpNYLastEntry and InpNYFlatTime must read HH:MM, and InpNYEnd HH:MM or empty.");
          return(INIT_PARAMETERS_INCORRECT);
       }
+      if(StringLen(nyEndText) == 0)
+         nyBoxEnd = nyBoxStart + InpRangeMinutes;
       if(nyBoxEnd <= nyBoxStart)
       {
          Print("InpNYEnd must be later than InpNYStart.");
@@ -708,8 +725,8 @@ int OnInit()
       }
       if((nyBoxEnd - nyBoxStart) % barMinutes != 0)
       {
-         PrintFormat("The NY box %s to %s is not a whole number of %d minute candles.",
-                     InpNYStart, InpNYEnd, barMinutes);
+         PrintFormat("The NY box %s to %02d:%02d is not a whole number of %d minute candles.",
+                     InpNYStart, nyBoxEnd / 60, nyBoxEnd % 60, barMinutes);
          return(INIT_PARAMETERS_INCORRECT);
       }
       if(nyLastEntry < nyBoxEnd || nyFlatten < nyBoxEnd)
@@ -1571,6 +1588,12 @@ ENUM_ORDER_TYPE_FILLING PickFillingMode()
 void LogBrokerCapabilities()
 {
    PrintFormat("Symbol %s  digits %d  point %.*f", _Symbol, _Digits, _Digits, _Point);
+   PrintFormat("Tick size %.*f  tick value %.5f %s  contract size %.2f  spread now %d points",
+               _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE),
+               SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE),
+               AccountInfoString(ACCOUNT_CURRENCY),
+               SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
    PrintFormat("Account mode: %s", isHedging ? "HEDGING" : "NETTING or EXCHANGE");
    PrintFormat("Volume min %.2f  max %.2f  step %.2f",
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
@@ -1908,7 +1931,7 @@ void WriteRecord(const int i)
       return;
    FileSeek(h, 0, SEEK_END);
 
-   string line = StringFormat("%s,%s,%s,%s,%s,%.*f,%.*f,%.2f,%.*f,%.*f,%.*f,%s,%s,%.3f,%d,%.2f,%s",
+   string line = StringFormat("%s,%s,%s,%s,%s,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%s,%s,%.3f,%d,%.2f,%s",
                               TimeToString(records[i].ukSignal, TIME_DATE),
                               TimeToString(records[i].ukSignal, TIME_MINUTES),
                               SessionTag(records[i].session),
@@ -1916,7 +1939,7 @@ void WriteRecord(const int i)
                               (records[i].dir > 0 ? "BUY" : "SELL"),
                               _Digits, records[i].boxLo,
                               _Digits, records[i].boxHi,
-                              records[i].boxHi - records[i].boxLo,
+                              _Digits, records[i].boxHi - records[i].boxLo,
                               _Digits, records[i].entry,
                               _Digits, records[i].stop,
                               _Digits, records[i].rAtStop,

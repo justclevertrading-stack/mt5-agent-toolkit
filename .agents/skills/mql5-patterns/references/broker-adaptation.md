@@ -133,3 +133,49 @@ if(spreadPoints > InpMaxSpreadPoints)
 ```
 
 Spread widens sharply around session opens and news. Every EA needs this.
+
+A points threshold is per instrument. OrbLondon's default 50 points is $0.50
+on Vantage XAUUSD but 0.50 index points on DJ30.i, whose spread is 1.2 to 1.5
+index points (118 to 148 points) at the London and New York opens: left at
+the default, the filter would refuse every Dow trade. 500 never rejected one
+in 2024 or 2025. Measured 2026-10-09.
+
+---
+
+## Price thresholds in points, not in the quote currency
+
+A filter written in dollars ("skip a range under $5") is only right on the
+instrument it was written for. Take the bound as an `int` in the symbol's
+points and convert it once, comparing in price:
+
+```cpp
+input int InpMinRangePoints = 500;   // $5.00 on a 2 digit XAUUSD
+input int InpMaxRangePoints = 2500;  // $25.00
+
+double span = hi - lo;
+if(span < InpMinRangePoints * _Point || span > InpMaxRangePoints * _Point)
+   return(false);
+int spanPoints = (int)MathRound(span / _Point);   // for the journal only
+```
+
+Comparing `span` against `points * _Point` keeps the old dollar thresholds
+bit for bit: `500 * 0.01` and `2500 * 0.01` round to exactly 5.0 and 25.0 in
+a double. OrbLondon 1.13 replaced its dollar inputs this way and reproduced
+the 1.12 XAUUSD CSV line for line (2025, both sessions, 178 rows). Comparing
+`MathRound(span / _Point)` against the bound instead would move ties.
+
+A "point" here is `_Point`, not an index point. On Vantage DJ30.i the point
+is 0.01, so 30 to 200 Dow points is 3000 to 20000.
+
+### Vantage DJ30.i, read 2026-10-09 (build 6230)
+
+| Field | Value |
+|---|---|
+| Name | `DJ30.i`, "Dow Jones Index Cash CFD (USD)". `DJ30ft.i` is the future, `DOW` is Dow Inc stock |
+| Digits / point / tick size | 2 / 0.01 / 0.01 |
+| Tick value | 0.01 USD per 0.01 per lot, so $1 per index point per lot |
+| Contract size | 1 |
+| Volume min / step | 0.1 / 0.1 |
+| Stops level | 500 points (5 index points) |
+| Spread | floating, 118 to 148 points when read; mean of the M5 bar spread at 13:30 and 14:30 UK over 2024-2025 was 129 |
+| Trade sessions | Mon to Fri 01:00 to 24:00 server, so 23:00 to 22:00 UK with a one hour break at 22:00 UK |

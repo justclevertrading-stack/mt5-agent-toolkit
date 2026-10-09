@@ -52,7 +52,7 @@ every respect that can block a trade:
 
 | | London | New York |
 |---|---|---|
-| Box | `InpRangeStartHour`:`InpRangeStartMinute` for `InpRangeMinutes` | `InpNYStart` to `InpNYEnd` |
+| Box | `InpRangeStartHour`:`InpRangeStartMinute` for `InpRangeMinutes` | `InpNYStart` to `InpNYEnd`; `InpNYEnd` empty (the default since 1.13) means `InpNYStart` + `InpRangeMinutes`, so `InpNYStart = 14:30` alone gives a 14:30-14:45 box |
 | Default box | 08:00-08:15 UK | 13:30-13:45 UK |
 | Last entry | `InpLastEntryHour`:`InpLastEntryMinute`, 12:30 UK | `InpNYLastEntry`, 16:00 UK |
 | Flat | `InpFlattenHour`:`InpFlattenMinute`, 20:00 UK | `InpNYFlatTime`, 16:00 UK |
@@ -106,16 +106,22 @@ box high without the ask ever reaching it.
   the three opening 13:30, 13:35 and 13:40 UK.
 - Range high = highest high of the three, range low = lowest low.
 - Locked at 08:15 UK. All three candles must exist or the session is skipped.
-- Range height = high - low, in dollars because XAUUSD is quoted in dollars.
+- Range height = high - low. Since 1.13 the filter bounds are inputs in the
+  symbol's points, `InpMinRangePoints` = 500 and `InpMaxRangePoints` = 2500,
+  which on Vantage XAUUSD (2 digits, point 0.01) are exactly the original $5
+  and $25. On another symbol set them in that symbol's points: on DJ30.i
+  (point 0.01) 30 to 200 index points is 3000 to 20000.
 
 ## Entry, long
-1. The range is locked and its height is between $5 and $25 inclusive.
+1. The range is locked and its height is between $5 and $25 inclusive
+   (`InpMinRangePoints` to `InpMaxRangePoints`).
 2. An M5 candle closes above the range high.
 3. On that same candle, EMA 9 > EMA 21.
 4. Enter at market on the open of the next candle.
 
 ## Entry, short
-1. The range is locked and its height is between $5 and $25 inclusive.
+1. The range is locked and its height is between $5 and $25 inclusive
+   (`InpMinRangePoints` to `InpMaxRangePoints`).
 2. An M5 candle closes below the range low.
 3. On that same candle, EMA 9 < EMA 21.
 4. Enter at market on the open of the next candle.
@@ -171,7 +177,8 @@ between runs. Baseline is every one of them at its default.
 | `InpEmaTimeframe` | PERIOD_M5 | PERIOD_H1 (16385 in a set file): the 9/21 EMAs are read on the last closed H1 bar instead of the M5 break candle |
 | `InpMoveToBreakEven` | true | false: TP1 still closes half, stop stays at the range edge |
 | `InpStopAtMidpoint` | false | true: stop at the range midpoint. Targets stay at 1 and 2 range heights, so the lot doubles at the same 1% risk |
-| `InpRangeFilterPct` | false | true: filter the range by `InpMinRangePct` to `InpMaxRangePct` of the range midpoint instead of by dollars |
+| `InpMinRangePoints` / `InpMaxRangePoints` | 500 / 2500 | Range filter bounds in the symbol's points ($5 / $25 on XAUUSD). Replaced `InpMinRangeUsd` / `InpMaxRangeUsd` in 1.13 |
+| `InpRangeFilterPct` | false | true: filter the range by `InpMinRangePct` to `InpMaxRangePct` of the range midpoint instead of by points |
 | `InpCommissionPerLot` | 0.0 | Accounting only, never moves a trade. 0.00 is correct for a Vantage Standard STP account, where the cost is in the spread |
 | `InpTradeLondon` | true | false: New York only |
 | `InpTradeNY` | true | false: London only, which is what the EA did before 2026-09-27 |
@@ -359,6 +366,132 @@ the EMA only because the EMA test ran before the first-break test. Since 1.12
 the first-break test runs first and logs "long side finished" once per side
 per session, so that day would now read one EMA rejection at 14:05 followed by
 one "side finished" line at 14:15.
+
+### Dow (DJ30.i) transplant, and later NY flat times, measured 2026-10-09
+
+Version 1.13 on the backtest-only portable install `C:\MT5-Backtest` (build
+6230), so the live terminal stayed up throughout. Model 1, $10,000, 1%, M5,
+commission 0, BREAK mode. 2025 = 2025.01.01-09.26, 2024 = the full year.
+History quality 100% in every run. Reports and CSVs are
+`reports\orbdj-20261009-<run>-<london|ny|both>-<year>.*`.
+
+**Parity first.** 1.13 on the new install reproduced the 2026-10-07 gold
+baseline A (2025, both sessions) CSV line for line: 178 rows, net +201.46. So
+the points range filter and the new install change nothing on gold.
+
+**Symbol.** Vantage's Dow is `DJ30.i`, "Dow Jones Index Cash CFD (USD)": 2
+digits, point and tick 0.01, tick value $0.01, contract 1 (so $1 per index
+point per lot), min lot 0.1 step 0.1, stops level 500 points (5 index
+points), floating spread 118 to 148 points when read, 129 on average in the
+M5 bars at 13:30 and 14:30 UK. Trades Mon-Fri 01:00-24:00 server, which is
+23:00-22:00 UK. M5 history 2024-01-02 to 2025-09-26, 450 trading days. The
+only day missing any 13:20-15:00 UK bar is 2025-01-09, when US markets were
+shut for the national day of mourning.
+
+**Dow inputs**, on top of the defaults: `InpMinRangePoints = 3000`,
+`InpMaxRangePoints = 20000` (30 to 200 index points), `InpMaxSpreadPoints =
+500`. The default 50-point spread cap would have refused every Dow trade;
+500 refused none. The EMA cross is on everywhere except U5.
+
+| Run | NY box | NY flat | Other |
+|---|---|---|---|
+| U1 | 13:30-13:45 | 16:00 | gold baseline settings |
+| U2 | 14:30-14:45 | 16:00 | |
+| U3 | 13:30 | 18:00 | NY last entry stays 16:00, so only the exit moves |
+| U3b | 13:30 | 20:00 | same |
+| U4 | 13:30 | 16:00 | `InpBreakMustHold = true` |
+| U5 | 13:30 | 16:00 | `InpUseEmaFilter = false` |
+| Gold A18, A20 | XAUUSD, live chart config (= defaults, A) | 18:00, 20:00 | |
+
+U1 beat U2 on New York in both years, so U3 to U5 are built on U1. London is
+the same in U1, U2, U3 and U3b because only NY inputs change; its row is
+the London-only run.
+
+n / win% / PF / net. "Both" max DD is the report's maximal equity drawdown.
+
+| Run | Year | London | New York | Both n / PF / net / max DD |
+|---|---|---|---|---|
+| U1 | 2025 | 127 / 55.91 / 1.16 / +936.52 | 115 / 60.87 / 1.39 / +1769.57 | 242 / 1.26 / +2824.49 / 8.58% |
+| U1 | 2024 | 118 / 48.31 / 0.76 / -1287.99 | 160 / 53.12 / 1.02 / +150.85 | 278 / 0.90 / -1175.98 / 22.77% |
+| U2 | 2025 | = U1 | 108 / 56.48 / 1.14 / +416.48 | 235 / 1.15 / +1327.84 / 7.94% |
+| U2 | 2024 | = U1 | 158 / 51.90 / 0.98 / -85.56 | 276 / 0.85 / -1364.49 / 20.27% |
+| U3 | 2025 | = U1 | 115 / 60.87 / 1.34 / +1585.32 | 242 / 1.24 / +2628.41 / 8.61% |
+| U3 | 2024 | = U1 | 160 / 54.38 / 1.05 / +367.65 | 278 / 0.91 / -1107.60 / 22.74% |
+| U3b | 2025 | = U1 | 115 / 61.74 / 1.38 / +1754.80 | 242 / 1.25 / +2753.44 / 8.58% |
+| U3b | 2024 | = U1 | 160 / 55.62 / 1.06 / +443.10 | 278 / 0.92 / -972.45 / 22.78% |
+| U4 | 2025 | 95 / 56.84 / 1.05 / +180.18 | 88 / 61.36 / 1.12 / +363.72 | 183 / 1.08 / +584.84 / 9.16% |
+| U4 | 2024 | 94 / 53.19 / 0.86 / -544.41 | 130 / 58.46 / 1.09 / +375.91 | 224 / 0.99 / -117.35 / 12.25% |
+| U5 | 2025 | 151 / 56.29 / 1.19 / +1323.37 | 136 / 57.35 / 1.17 / +976.57 | 287 / 1.19 / +2484.53 / 10.92% |
+| U5 | 2024 | 133 / 48.87 / 0.86 / -879.95 | 173 / 51.45 / 0.97 / -226.58 | 306 / 0.93 / -1030.17 / 24.67% |
+| Gold A (2026-10-07) | 2025 | 72 / 52.78 / 0.97 / -97.43 | 105 / 56.19 / 1.08 / +296.81 | 177 / 1.03 / +201.46 / 11.08% |
+| Gold A | 2024 | 17 / 52.94 / 1.00 / +0.34 | 109 / 49.54 / 1.01 / +38.07 | 126 / 1.00 / +12.47 / 10.78% |
+| Gold A18 | 2025 | = A | 107 / 59.81 / 1.24 / +901.23 | 179 / 1.11 / +766.78 / 10.40% |
+| Gold A18 | 2024 | = A | 110 / 51.82 / 1.01 / +50.03 | 127 / 1.00 / +5.82 / 10.85% |
+| Gold A20 | 2025 | = A | 107 / 58.88 / 1.21 / +824.74 | 179 / 1.09 / +678.92 / 10.83% |
+| Gold A20 | 2024 | = A | 110 / 52.73 / 1.02 / +92.58 | 127 / 1.01 / +59.43 / 11.11% |
+
+Single-session max equity DD, for reference: Dow London U1 7.04% / 18.29%
+(2025 / 2024); Dow NY U1 6.71% / 13.91%, U2 5.61% / 8.79%, U3 6.70% /
+13.48%, U3b 6.72% / 13.45%, U4 6.71% / 9.13%, U5 5.72% / 14.95%.
+
+**Box heights**, index points, every session of the period, from the EA's
+journal:
+
+| Box | Year | Sessions | p5 | p25 | median | p75 | p95 | < 30 | > 200 | Skipped |
+|---|---|---|---|---|---|---|---|---|---|---|
+| London 08:00 | 2025 | 190 | 22 | 32 | 42 | 63 | 119 | 35 | 4 | 20.5% |
+| London 08:00 | 2024 | 258 | 16 | 22 | 31 | 41 | 84 | 123 | 1 | **48.1%** |
+| NY 13:30 | 2025 | 190 | 20 | 33 | 52 | 82 | 279 | 38 | 16 | 28.4% |
+| NY 13:30 | 2024 | 258 | 15 | 28 | 44 | 71 | 198 | 71 | 13 | **32.6%** |
+| NY 14:30 | 2025 | 189 | 78 | 104 | 136 | 180 | 308 | 0 | 35 | 18.5% |
+| NY 14:30 | 2024 | 258 | 62 | 94 | 121 | 159 | 228 | 4 | 28 | 12.4% |
+
+Every 2024 run with London on skipped more than 30% of London sessions, and
+every 2024 run on the 13:30 box skipped more than 30% of NY ones. In both
+cases nearly all the skips are boxes under 30, not over 200. The 14:30 box
+is a different animal: its median is about three times the 13:30 box's, it
+almost never falls under 30, and its skips are at the top. One 30-200 band
+cannot suit both boxes. Unlike gold, price level explains little of 2024's
+smaller boxes: the Dow averaged about 40 600 at entry in 2024 against
+43 200 in 2025, 6% lower, while the median London box was 26% smaller.
+2024 was simply quieter in the morning.
+
+**The 20 largest losses** in every Dow two-session run are full stops at
+exactly -1.00 R; none is a time cut or a gap through the stop. They are
+listed with dates in `strategies/OrbLondon-DJ30-losses.md`. In U1 they split
+12 London / 8 NY in 2025 and 8 / 12 in 2024.
+
+What the numbers say, and what they do not:
+
+- **No robust edge on the Dow as a two-session system.** Every variant makes
+  money in 2025 (PF 1.08 to 1.26) and loses or breaks even in 2024 (PF 0.85
+  to 0.99), with 2024 drawdowns of 20-25% in the full-filter runs. The swing
+  between years is bigger than any difference between variants.
+- **London is what fails.** The Dow London box loses in 2024 in every variant
+  (PF 0.76 to 0.86), and it is the session the range filter cut hardest.
+- **The 13:30 NY box is the only part positive in both years**, in U1, U3,
+  U3b and U4: PF 1.39 / 1.02, 1.34 / 1.05, 1.38 / 1.06, 1.12 / 1.09. 2024 is
+  the year that matters for robustness, and there it is PF 1.02 to 1.09 over
+  130-160 trades, small enough that commission and slippage could erase it.
+  This is the best candidate on the Dow, and it is a candidate, not a
+  finding.
+- **U2 (14:30, cash open) is crippled by the 16:00 flat.** 78 of 108 (2025)
+  and 126 of 158 (2024) NY trades were time cuts: a box of median 120-136
+  points, a target two boxes away and 1h15 to get there. U2 with a later
+  flat was not run. It is the obvious next test before 14:30 is ruled out.
+- **A later NY flat helps a little on the Dow and more on gold.** On the Dow
+  NY, 18:00 and 20:00 change 2024 from +151 to +368 and +443 and leave 2025
+  about level. On gold NY, 18:00 lifts 2025 from PF 1.08 to 1.24 (+297 to
+  +901) but leaves 2024 at PF 1.01. On gold, 18:00 and 20:00 are nearly
+  identical. Gold NY gains two trades in 2025 (105 to 107) because a break
+  closing at 16:00 is refused when the flat is 16:00 (no entry at the flat
+  time) but taken when the flat is later.
+- **Break-must-hold (U4)** gives the lowest 2024 drawdown (12.25%) and the
+  best 2024 NY PF, at the cost of most of the 2025 profit.
+- **Removing the EMA filter (U5)** is worse in 2024 on both sessions.
+- Not real-tick, not walk-forward, commission 0 (Vantage Standard STP prices
+  costs into the spread), one broker. None of this is a recommendation to
+  trade.
 
 ## Logging
 
