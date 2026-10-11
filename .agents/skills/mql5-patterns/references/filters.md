@@ -237,3 +237,21 @@ The honest options, in order of preference:
 
 If the user asks for automatic news avoidance, explain the backtest problem
 before building it. Do not silently produce a filter that only works live.
+
+## Higher-timeframe value "as of" a past moment
+
+To read an H1 indicator as it stood at some earlier M5 time (e.g. "H1 EMA at
+the box end", evaluated later on), find the H1 bar containing that time and
+step one bar older, so the value comes from a closed H1 bar and cannot repaint:
+
+```mql5
+int shift = iBarShift(_Symbol, PERIOD_H1, momentServer, false); // H1 bar containing the moment
+double f[1];
+if(shift < 0 || CopyBuffer(fastHandle, 0, shift + 1, 1, f) < 1) { /* not ready, retry later */ }
+```
+
+Cache the result per day once read, but do not cache a failure, so a missing
+bar is retried on the next candle. Verified in `OrbRichard.mq5` (2026-10-11):
+2025-02-25 NY read the 12:00 UK H1 bar at 13:45 UK.
+
+**Recorded:** 2026-10-11

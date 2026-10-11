@@ -213,3 +213,30 @@ and compare the per-session trade counts: 72 London and 105 New York alone, 72
 and 105 together, with 43 days holding one of each.
 
 **Recorded:** 2026-09-27
+
+## Multi-candle setups: replay the session from bars, don't carry a state machine
+
+A setup that spans candles ("signal, then wait up to 6 candles for a retest,
+re-arm on a close back inside, give up after two signals") tempts a global
+state variable per session. That state is lost on restart and silently drifts
+from the chart if one tick is missed. Instead, on every new bar replay the
+session's closed candles from the box end up to index 1 through a small local
+state machine, and act only on what happens on the last one:
+
+```mql5
+for(int i = firstBar; i >= 1; i--)            // oldest candle after the box ... just closed
+{
+   double closeIn = dir * (iClose(_Symbol, WORK_TF, i) - edge);   // > 0 beyond the edge
+   double favOut  = dir * ((dir > 0 ? iHigh(_Symbol, WORK_TF, i) : iLow(_Symbol, WORK_TF, i)) - edge);
+   bool   last    = (i == 1);
+   // state 0 armed, 1 signalled, 2 done ... transitions here ...
+   // report an event only when last == true
+}
+```
+
+Signing every distance with `dir` (+1 long, -1 short) lets one code path serve
+both sides. About 100 candles per session per new bar costs nothing in the
+tester. Verified in `src/Experts/OrbRichard.mq5`: the CSV it writes from these
+events reconciled to the report's net profit to the cent (88 trades, 2025).
+
+**Recorded:** 2026-10-11
