@@ -34,7 +34,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.13"
+#property version   "1.14"
 #property description "London and New York opening range breakout, M5. Built on XAUUSD, range filter in points."
 
 #include <Trade\Trade.mqh>
@@ -131,6 +131,25 @@ input ENUM_NY_EMA_FILTER InpNyEmaFilter = NY_EMA_CROSS; // New York trend filter
 // are a subset of the default ones. A break that does not hold finishes that
 // side for the session, as an EMA rejection does. Both sessions alike.
 input bool   InpBreakMustHold    = false;   // Require the candle after the break to close outside too
+// A break candle taller than this percent of the box height is not entered.
+// The next close beyond the same edge is tested the same way, and a skipped
+// candle does not count as the first break. Both sessions alike.
+input double InpBigBreakSkipPct  = 0.0;     // Skip a break candle above this % of the box height, 0 = off
+
+input group "=== Lid fade, London only. Off by default ===";
+// Arms when the London first-break trade fails: its stop is hit at a loss, or
+// within InpLidFadeWindow candles of the break a candle closes back inside.
+// Once armed, the first candle that wicks to the broken edge and closes back
+// inside the box is faded at market. Stop beyond the extreme since the break
+// plus one spread, TP1 at the opposite edge, TP2 one box beyond it. One fade
+// per session. A first-break position still open is closed first.
+input bool   InpLidFade          = false;   // Fade a failed London first break at the broken edge
+input int    InpLidFadeWindow    = 6;       // Candles after the break in which a close back inside arms the fade
+input long   InpFadeMagicOffset  = 2;       // Added to InpMagic for lid fade trades
+
+input group "=== Exit variants. Off by default ===";
+input int    InpBreakEvenPoints  = 0;       // Stop to entry + spread once this many points in profit, 0 = off
+input bool   InpExitOnEmaCross   = false;   // After TP1, close the rest on a fresh M5 EMA9/21 cross against it
 
 input group "=== Risk management ===";
 input double InpRiskPercent      = 1.0;     // Risk per trade, % of balance
@@ -161,11 +180,20 @@ input string InpComment          = "OrbLondon"; // Order comment
 #define SCAN_BARS      400          // 08:00 to 20:00 UK is 144 M5 bars
 #define SESSION_LON    0
 #define SESSION_NY     1
-#define SESSION_COUNT  2
+#define SESSION_FADE   2            // London lid fade, its own magic and CSV rows
+#define SESSION_COUNT  3
 
 CTrade   trade;
 int      fastHandle  = INVALID_HANDLE;
 int      slowHandle  = INVALID_HANDLE;
+int      exitFastHandle = INVALID_HANDLE;   // M5 EMAs for InpExitOnEmaCross
+int      exitSlowHandle = INVALID_HANDLE;
+
+// The London box cached for the lid fade's TP1, so it is not rebuilt per tick.
+datetime fadeBoxDay = 0;
+double   fadeBoxHi  = 0.0;
+double   fadeBoxLo  = 0.0;
+datetime fadeArmLoggedDay = 0;      // UK day the "lid fade armed" line was logged
 datetime lastBarTime = 0;
 bool     isHedging   = false;
 
@@ -335,10 +363,34 @@ bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool
       double c = iClose(_Symbol, WORK_TF, i);
       if(c <= 0.0)
          continue;
+      if(IsBigBreakCandle(i, hi - lo))
+         continue;                            // skipped as too big, never the first break
       if((above && c > hi) || (!above && c < lo))
          firstUk = uk;                        // walking back, so the last hit is the first
    }
    return(firstUk == 0);
+}
+
+//--- InpBigBreakSkipPct: is the candle at index bar taller than that share of
+//--- the box? Always false when the input is 0.
+bool IsBigBreakCandle(const int bar, const double span)
+{
+   if(InpBigBreakSkipPct <= 0.0 || span <= 0.0)
+      return(false);
+   double h = iHigh(_Symbol, WORK_TF, bar);
+   double l = iLow(_Symbol, WORK_TF, bar);
+   return(h - l > span * InpBigBreakSkipPct / 100.0);
+}
+
+//--- Log a break candle skipped for its size. The next close beyond the
+//--- same edge is tested again.
+void LogBigCandleSkip(const int s, const int dir, const int bar, const double span)
+{
+   PrintFormat("%s %s: big-candle skip. Close %s range %s, candle %.*f high to low is above %.0f%% of "
+               "the %.*f box. Waiting for the next close beyond.",
+               InpComment, SessionTag(s), (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
+               _Digits, iHigh(_Symbol, WORK_TF, bar) - iLow(_Symbol, WORK_TF, bar),
+               InpBigBreakSkipPct, _Digits, span);
 }
 
 //--- InpFirstBreakOnly: an earlier candle already closed beyond this side, so
@@ -525,6 +577,11 @@ bool DetectSignal(const int s)
          LogSideFinished(s, ukDay, 1, firstUk, hi);
          return(false);
       }
+      if(IsBigBreakCandle(breakBar, span))
+      {
+         LogBigCandleSkip(s, 1, breakBar, span);
+         return(false);
+      }
       if(!EmaAgrees(s, 1, breakBar, close, hi, lo))
          return(false);
       if(InpBreakMustHold && !BreakHeld(s, 1, hi, lo))
@@ -545,6 +602,11 @@ bool DetectSignal(const int s)
       if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo, breakBar, firstUk))
       {
          LogSideFinished(s, ukDay, -1, firstUk, lo);
+         return(false);
+      }
+      if(IsBigBreakCandle(breakBar, span))
+      {
+         LogBigCandleSkip(s, -1, breakBar, span);
          return(false);
       }
       if(!EmaAgrees(s, -1, breakBar, close, hi, lo))
@@ -573,13 +635,17 @@ bool DetectSignal(const int s)
 //+------------------------------------------------------------------+
 //| Session definition. All four values are minutes into the UK day.  |
 //+------------------------------------------------------------------+
+//--- The lid fade is a London trade with its own magic number. Its box, last
+//--- entry and flatten time are London's.
 string SessionTag(const int s)
 {
+   if(s == SESSION_FADE) return("FADE");
    return(s == SESSION_NY ? "NY" : "LON");
 }
 
 long SessionMagic(const int s)
 {
+   if(s == SESSION_FADE) return(InpMagic + InpFadeMagicOffset);
    return(s == SESSION_NY ? InpMagic + InpNyMagicOffset : InpMagic);
 }
 
@@ -588,11 +654,13 @@ int SessionOfMagic(const long magic)
 {
    if(magic == InpMagic)                     return(SESSION_LON);
    if(magic == InpMagic + InpNyMagicOffset)  return(SESSION_NY);
+   if(InpLidFade && magic == InpMagic + InpFadeMagicOffset) return(SESSION_FADE);
    return(-1);
 }
 
 bool SessionEnabled(const int s)
 {
+   if(s == SESSION_FADE) return(InpTradeLondon && InpLidFade);
    return(s == SESSION_NY ? InpTradeNY : InpTradeLondon);
 }
 
@@ -692,6 +760,29 @@ int OnInit()
       Print("InpRetestBars must be above zero in RETEST mode.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+   if(InpBigBreakSkipPct < 0.0 || InpBreakEvenPoints < 0)
+   {
+      Print("InpBigBreakSkipPct and InpBreakEvenPoints must not be negative.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpLidFade)
+   {
+      if(InpEntryMode != ENTRY_BREAK)
+      {
+         Print("InpLidFade needs InpEntryMode = BREAK.");
+         return(INIT_PARAMETERS_INCORRECT);
+      }
+      if(InpLidFadeWindow <= 0)
+      {
+         Print("InpLidFadeWindow must be above zero.");
+         return(INIT_PARAMETERS_INCORRECT);
+      }
+      if(InpFadeMagicOffset == 0 || InpFadeMagicOffset == InpNyMagicOffset)
+      {
+         Print("InpFadeMagicOffset must be non-zero and differ from InpNyMagicOffset.");
+         return(INIT_PARAMETERS_INCORRECT);
+      }
+   }
 
    // The New York times are only parsed and enforced when that session is on,
    // so a malformed string cannot stop a London only run from starting.
@@ -742,6 +833,18 @@ int OnInit()
    {
       Print("Failed to create indicator handles, error ", GetLastError());
       return(INIT_FAILED);
+   }
+   // Always M5, whatever InpEmaTimeframe says: the exit watches the chart the
+   // trade is managed on.
+   if(InpExitOnEmaCross)
+   {
+      exitFastHandle = iMA(_Symbol, PERIOD_M5, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      exitSlowHandle = iMA(_Symbol, PERIOD_M5, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(exitFastHandle == INVALID_HANDLE || exitSlowHandle == INVALID_HANDLE)
+      {
+         Print("Failed to create the EMA exit handles, error ", GetLastError());
+         return(INIT_FAILED);
+      }
    }
 
    ArraySetAsSeries(fastMA, true);
@@ -801,6 +904,8 @@ void OnDeinit(const int reason)
 
    if(fastHandle != INVALID_HANDLE) IndicatorRelease(fastHandle);
    if(slowHandle != INVALID_HANDLE) IndicatorRelease(slowHandle);
+   if(exitFastHandle != INVALID_HANDLE) IndicatorRelease(exitFastHandle);
+   if(exitSlowHandle != INVALID_HANDLE) IndicatorRelease(exitSlowHandle);
    // Never close positions here. OnDeinit also runs on recompile and on a
    // chart template change, and closing then would be a disaster.
 }
@@ -827,11 +932,12 @@ void OnTick()
    lastBarTime = current;
 
    CheckCloseBackInside();
+   CheckEmaCrossExit();
 
    for(int s = 0; s < SESSION_COUNT; s++)
    {
-      if(!SessionEnabled(s))
-         continue;
+      if(s == SESSION_FADE || !SessionEnabled(s))
+         continue;                  // the fade has its own trigger, below
 
       // Never enter at or after this session's own flatten time. Without this
       // a session whose last entry time equals its flatten time, which is the
@@ -865,6 +971,9 @@ void OnTick()
       else
          OpenPosition(s, signalDir == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
    }
+
+   if(SessionEnabled(SESSION_FADE))
+      CheckLidFade();
 
    FlushSettledRecords();
 }
@@ -914,8 +1023,433 @@ void ManageOpenPositions()
          continue;
       }
 
+      if(InpBreakEvenPoints > 0)
+      {
+         HandleBreakEvenPoints(ticket);
+         if(!PositionSelectByTicket(ticket))   // reread the stop it may have moved
+            continue;
+      }
       HandleFirstTarget(ticket);
    }
+}
+
+//+------------------------------------------------------------------+
+//| InpBreakEvenPoints: once the position is that many points in      |
+//| profit, move the stop to entry plus the current spread. Separate  |
+//| from TP1, and never moves a stop backwards.                       |
+//+------------------------------------------------------------------+
+void HandleBreakEvenPoints(const ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return;
+
+   bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+   double open  = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl    = PositionGetDouble(POSITION_SL);
+   double tp    = PositionGetDouble(POSITION_TP);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(open <= 0.0 || bid <= 0.0 || ask <= 0.0)
+      return;
+
+   double gain = isBuy ? bid - open : open - ask;
+   if(gain < InpBreakEvenPoints * _Point)
+      return;
+
+   double spread    = ask - bid;
+   double target    = NormalizePrice(isBuy ? open + spread : open - spread);
+   double halfPoint = _Point * 0.5;
+   if(sl > 0.0 && ((isBuy && sl >= target - halfPoint) || (!isBuy && sl <= target + halfPoint)))
+      return;                                    // already there or better
+
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel < InpMinStopsLevel)
+      stopsLevel = InpMinStopsLevel;
+   double minGap = (stopsLevel + 1) * _Point;
+   if((isBuy && target > bid - minGap) || (!isBuy && target < ask + minGap))
+      return;                                    // too close to price this tick
+
+   if(trade.PositionModify(ticket, target, tp))
+      PrintFormat("%s: %d points in profit, stop moved to entry + spread %.*f on #%I64u.",
+                  InpComment, InpBreakEvenPoints, _Digits, target, ticket);
+   else
+      PrintFormat("Break even (points) modify failed for #%I64u: %s",
+                  ticket, RetcodeText(trade.ResultRetcode()));
+}
+
+//+------------------------------------------------------------------+
+//| InpExitOnEmaCross: after TP1, close what is left when the bar that |
+//| has just closed made a fresh M5 EMA9/21 cross against the trade.  |
+//| The stop at entry stays as the backstop until then.               |
+//+------------------------------------------------------------------+
+void CheckEmaCrossExit()
+{
+   if(!InpExitOnEmaCross)
+      return;
+
+   double f[], w[];
+   ArraySetAsSeries(f, true);
+   ArraySetAsSeries(w, true);
+   if(CopyBuffer(exitFastHandle, 0, 0, 3, f) < 3) return;
+   if(CopyBuffer(exitSlowHandle, 0, 0, 3, w) < 3) return;
+
+   bool crossDown = (f[2] >= w[2] && f[1] < w[1]);
+   bool crossUp   = (f[2] <= w[2] && f[1] > w[1]);
+   if(!crossDown && !crossUp)
+      return;
+
+   datetime barClose = iTime(_Symbol, WORK_TF, 1) + PeriodSeconds(WORK_TF);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      int s = SessionOfMagic(PositionGetInteger(POSITION_MAGIC));
+      if(s < 0) continue;
+
+      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      if((isBuy && !crossDown) || (!isBuy && !crossUp))
+         continue;
+
+      // TP1 must already be behind the trade, and the cross must close after it.
+      datetime tp1Time = FirstPartialCloseTime((ulong)PositionGetInteger(POSITION_IDENTIFIER));
+      if(tp1Time == 0 || barClose <= tp1Time)
+         continue;
+
+      sess[s].exitTag = "emacross";
+      if(trade.PositionClose(ticket))
+         PrintFormat("%s %s: #%I64u runner closed, M5 EMA%d crossed %s EMA%d after TP1.",
+                     InpComment, SessionTag(s), ticket, InpFastEmaPeriod,
+                     (isBuy ? "below" : "above"), InpSlowEmaPeriod);
+      else
+      {
+         sess[s].exitTag = "";
+         PrintFormat("Close failed for #%I64u: %s", ticket, RetcodeText(trade.ResultRetcode()));
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| InpLidFade, London only. Runs once per closed bar.                |
+//|                                                                   |
+//| Everything is read back from bars and the deal history: the      |
+//| London first-break trade, whether and when it failed, and whether |
+//| the day's one fade has been taken, so a restart loses nothing.    |
+//|                                                                   |
+//| Arms when the first-break trade fails:                            |
+//|  (a) its stop is hit at a loss before any partial close, or       |
+//|  (b) within InpLidFadeWindow candles after the break candle, a    |
+//|      candle closes back inside the box.                           |
+//| The first candle after the arming one whose wick reaches the      |
+//| broken edge and whose close is inside the box is faded at market.  |
+//| Only that first candle counts: if it is skipped, the session has   |
+//| had its fade.                                                     |
+//+------------------------------------------------------------------+
+void CheckLidFade()
+{
+   datetime barTime = iTime(_Symbol, WORK_TF, 1);
+   if(barTime <= 0)
+      return;
+
+   datetime uk     = ServerToUk(barTime);
+   datetime ukDay  = UkDayOf(uk);
+   int      minute = UkMinuteOfDay(uk);
+   if(minute < SessionBoxEnd(SESSION_LON) || IsPastFlatten(SESSION_FADE))
+      return;
+
+   long fadeMagic = SessionMagic(SESSION_FADE);
+   if(CountMyPositions(fadeMagic) > 0 || CountMyEntriesToday(fadeMagic) > 0)
+      return;                                    // one fade per session
+
+   datetime entryTime = 0;
+   int      dir       = 0;
+   ulong    positionId = 0;
+   if(!FindLondonEntryToday(entryTime, dir, positionId))
+      return;                                    // no first-break trade, no fade
+
+   // The entry fills on the open of the candle after the break candle.
+   int entryShift = iBarShift(_Symbol, WORK_TF, entryTime, false);
+   if(entryShift < 1)
+      return;                                    // entered on this very tick
+   int breakShift = entryShift + 1;
+
+   double hi = 0.0, lo = 0.0;
+   if(!ComputeSessionBox(SESSION_LON, ukDay, hi, lo))
+      return;
+
+   // Arm (b): a close back inside within the window. The earliest one counts.
+   int    armShift = 0;
+   string armWhy   = "";
+   for(int k = breakShift - 1; k >= 1 && k >= breakShift - InpLidFadeWindow; k--)
+   {
+      double c = iClose(_Symbol, WORK_TF, k);
+      if((dir > 0 && c < hi) || (dir < 0 && c > lo))
+      {
+         armShift = k;
+         armWhy   = StringFormat("candle %d after the break closed back inside at %.*f",
+                                 breakShift - k, _Digits, c);
+         break;
+      }
+   }
+
+   // Arm (a): stopped at a loss. Whichever arming came first wins.
+   datetime stopTime = StoppedAtLossTime(positionId);
+   if(stopTime > 0)
+   {
+      int stopShift = iBarShift(_Symbol, WORK_TF, stopTime, false);
+      if(stopShift >= 1 && stopShift > armShift)
+      {
+         armShift = stopShift;
+         armWhy   = "first-break position stopped";
+      }
+   }
+   if(armShift == 0)
+      return;
+
+   if(fadeArmLoggedDay != ukDay)
+   {
+      fadeArmLoggedDay = ukDay;
+      PrintFormat("%s FADE: armed on the candle opening %s UK, %s. The %s break at %.*f failed; "
+                  "waiting for a rejection at the edge to %s.",
+                  InpComment, TimeToString(ServerToUk(iTime(_Symbol, WORK_TF, armShift)), TIME_MINUTES),
+                  armWhy, (dir > 0 ? "long" : "short"), _Digits, (dir > 0 ? hi : lo),
+                  (dir > 0 ? "sell" : "buy"));
+   }
+
+   // The first rejection candle after the arming one.
+   int rejectShift = 0;
+   for(int k = armShift - 1; k >= 1; k--)
+   {
+      double c = iClose(_Symbol, WORK_TF, k);
+      if(!(c < hi && c > lo))
+         continue;
+      if((dir > 0 && iHigh(_Symbol, WORK_TF, k) >= hi) || (dir < 0 && iLow(_Symbol, WORK_TF, k) <= lo))
+      {
+         rejectShift = k;
+         break;
+      }
+   }
+   if(rejectShift != 1)
+      return;                                    // none yet, or the first was already handled
+
+   signalWhy = StringFormat("lid fade, candle %s UK wicked to %.*f and closed inside at %.*f",
+                            TimeToString(uk, TIME_MINUTES), _Digits, (dir > 0 ? hi : lo),
+                            _Digits, iClose(_Symbol, WORK_TF, 1));
+
+   if(minute >= SessionLastEntry(SESSION_FADE))
+   {
+      PrintFormat("%s FADE: skipped, rejection candle opens at or after the London last entry. %s",
+                  InpComment, signalWhy);
+      return;
+   }
+   if(!IsSpreadAcceptable())
+   {
+      PrintFormat("%s FADE: skipped, spread %d above %d points. %s", InpComment,
+                  (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), InpMaxSpreadPoints, signalWhy);
+      return;
+   }
+
+   // The extreme since the break, break candle and rejection candle included.
+   double extreme = (dir > 0) ? iHigh(_Symbol, WORK_TF, breakShift) : iLow(_Symbol, WORK_TF, breakShift);
+   for(int k = breakShift - 1; k >= 1; k--)
+      extreme = (dir > 0) ? MathMax(extreme, iHigh(_Symbol, WORK_TF, k))
+                          : MathMin(extreme, iLow(_Symbol, WORK_TF, k));
+
+   // Never two opposite London positions: a first-break trade still open is
+   // closed before the fade goes in.
+   if(!CloseLondonForFade(positionId))
+      return;
+
+   OpenFade(-dir, extreme, hi, lo);
+}
+
+//--- Today's London first-break entry: its time, direction and position.
+bool FindLondonEntryToday(datetime &entryTime, int &dir, ulong &positionId)
+{
+   entryTime  = 0;
+   dir        = 0;
+   positionId = 0;
+
+   datetime now      = ServerNow();
+   datetime ukToday  = UkDayOf(ServerToUk(now));
+   datetime dayStart = now - (ServerToUk(now) - ukToday);
+   if(!HistorySelect(dayStart, now + 60))
+      return(false);
+
+   long magic = SessionMagic(SESSION_LON);
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC)  != magic)   continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL)  != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY)  != DEAL_ENTRY_IN) continue;
+      datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(UkDayOf(ServerToUk(t)) != ukToday) continue;
+      if(entryTime != 0 && t >= entryTime) continue;
+      entryTime  = t;
+      dir        = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : -1;
+      positionId = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
+   }
+   return(entryTime != 0);
+}
+
+//--- When the position's first exit was its stop, at a loss, the time of it.
+//--- 0 when it is still open, or took TP1 first, or closed any other way.
+datetime StoppedAtLossTime(const ulong positionId)
+{
+   if(positionId == 0 || !HistorySelectByPosition(positionId))
+      return(0);
+
+   datetime first  = 0;
+   long     reason = -1;
+   double   profit = 0.0;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(first != 0 && t >= first) continue;
+      first  = t;
+      reason = HistoryDealGetInteger(ticket, DEAL_REASON);
+      profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+   }
+   return((reason == DEAL_REASON_SL && profit < 0.0) ? first : 0);
+}
+
+//--- Close the London first-break position if it is still open. False only
+//--- when a close was needed and failed.
+bool CloseLondonForFade(const ulong positionId)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if((ulong)PositionGetInteger(POSITION_IDENTIFIER) != positionId) continue;
+
+      sess[SESSION_LON].exitTag = "fadeexit";
+      if(trade.PositionClose(ticket))
+      {
+         PrintFormat("%s LON: #%I64u closed to make way for the lid fade.", InpComment, ticket);
+         SyncTracking(SESSION_LON);
+         return(true);
+      }
+      sess[SESSION_LON].exitTag = "";
+      PrintFormat("%s FADE: skipped, closing first-break #%I64u failed: %s",
+                  InpComment, ticket, RetcodeText(trade.ResultRetcode()));
+      return(false);
+   }
+   return(true);
+}
+
+//--- The fade order. Stop beyond the extreme since the break by one spread,
+//--- TP1 at the opposite edge (handled by HandleFirstTarget), TP2 one box
+//--- beyond it as the order's own target.
+void OpenFade(const int dir, const double extreme, const double hi, const double lo)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0.0 || bid <= 0.0)
+      return;
+
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel < InpMinStopsLevel)
+      stopsLevel = InpMinStopsLevel;
+   double minGap = (stopsLevel + 1) * _Point;
+
+   bool   isBuy  = (dir > 0);
+   double spread = ask - bid;
+   double span   = hi - lo;
+   double price  = isBuy ? ask : bid;
+   double sl     = NormalizePrice(isBuy ? extreme - spread : extreme + spread);
+   double tp     = NormalizePrice(isBuy ? hi + span : lo - span);
+
+   int idx = NewRecord(SESSION_FADE, dir, price, sl, hi, lo);
+
+   if(isBuy && sl > price - minGap)
+   {
+      SkipRecord(idx, StringFormat("stop %.*f is not %d points below ask %.*f",
+                                   _Digits, sl, (int)stopsLevel, _Digits, price));
+      return;
+   }
+   if(!isBuy && sl < price + minGap)
+   {
+      SkipRecord(idx, StringFormat("stop %.*f is not %d points above bid %.*f",
+                                   _Digits, sl, (int)stopsLevel, _Digits, price));
+      return;
+   }
+   if(MathAbs(tp - price) < minGap)
+   {
+      SkipRecord(idx, StringFormat("target %.*f is inside the stops level", _Digits, tp));
+      return;
+   }
+
+   double lot = CalculateLot(MathAbs(price - sl));
+   if(lot <= 0.0)
+   {
+      SkipRecord(idx, "calculated lot is zero; risk too small or balance too low");
+      return;
+   }
+
+   trade.SetExpertMagicNumber(SessionMagic(SESSION_FADE));
+
+   bool ok = isBuy ? trade.Buy(lot, _Symbol, 0.0, sl, tp, InpComment)
+                   : trade.Sell(lot, _Symbol, 0.0, sl, tp, InpComment);
+
+   uint code = trade.ResultRetcode();
+   if(ok && (code == TRADE_RETCODE_DONE || code == TRADE_RETCODE_DONE_PARTIAL))
+   {
+      PrintFormat("%s FADE %s %.2f lot at %.*f, SL %.*f, TP1 %.*f, TP2 %.*f | %s",
+                  InpComment, (isBuy ? "BUY" : "SELL"), lot, _Digits, price, _Digits, sl,
+                  _Digits, (isBuy ? hi : lo), _Digits, tp, signalWhy);
+      sess[SESSION_FADE].pendingRecord = idx;
+      SyncTracking(SESSION_FADE);
+   }
+   else
+   {
+      SkipRecord(idx, StringFormat("order rejected: %s", RetcodeText(code)));
+      PrintFormat("Order rejected: %s (retcode %u)", RetcodeText(code), code);
+   }
+}
+
+//--- The London box of the day a fade opened, cached per day.
+bool FadeBox(const datetime openTime)
+{
+   datetime day = UkDayOf(ServerToUk(openTime));
+   if(fadeBoxDay == day)
+      return(true);
+   double hi = 0.0, lo = 0.0;
+   if(!ComputeSessionBox(SESSION_LON, day, hi, lo))
+      return(false);
+   fadeBoxDay = day;
+   fadeBoxHi  = hi;
+   fadeBoxLo  = lo;
+   return(true);
+}
+
+//--- Time of the first partial close of a position, 0 if none.
+datetime FirstPartialCloseTime(const ulong positionId)
+{
+   if(!HistorySelectByPosition(positionId))
+      return(0);
+
+   datetime first = 0;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(first == 0 || t < first)
+         first = t;
+   }
+   return(first);
 }
 
 //+------------------------------------------------------------------+
@@ -943,7 +1477,7 @@ void CheckCloseBackInside()
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
 
       int s = SessionOfMagic(PositionGetInteger(POSITION_MAGIC));
-      if(s < 0) continue;
+      if(s < 0 || s == SESSION_FADE) continue;   // a fade starts inside the box
 
       double hi = 0.0, lo = 0.0;
       if(!ComputeSessionBox(s, ukDay, hi, lo))
@@ -990,19 +1524,37 @@ void HandleFirstTarget(const ulong ticket)
       return;
 
    // When the break even move is on, a stop already at entry says the same
-   // thing, and covers the position that was too small to split.
+   // thing, and covers the position that was too small to split. Not with
+   // InpBreakEvenPoints, which puts the stop at entry before TP1; there the
+   // unsplittable position is remembered by splitWarnedPosition instead.
    double halfPoint = _Point * 0.5;
-   if(InpMoveToBreakEven && sl > 0.0 &&
-      ((isBuy && sl >= open - halfPoint) || (!isBuy && sl <= open + halfPoint)))
+   if(InpBreakEvenPoints > 0)
+   {
+      if(splitWarnedPosition == positionId)
+         return;
+   }
+   else if(InpMoveToBreakEven && sl > 0.0 &&
+           ((isBuy && sl >= open - halfPoint) || (!isBuy && sl <= open + halfPoint)))
       return;
 
-   double span = (tp > 0.0) ? MathAbs(tp - open) / InpTp2RangeMult
-                            : ((sl > 0.0) ? MathAbs(open - sl) : 0.0);
-   if(span <= 0.0)
-      return;
-
-   double target1 = isBuy ? open + span * InpTp1RangeMult
-                          : open - span * InpTp1RangeMult;
+   double target1 = 0.0;
+   if(SessionOfMagic(PositionGetInteger(POSITION_MAGIC)) == SESSION_FADE)
+   {
+      // The fade's TP1 is the opposite edge of the London box, not a multiple
+      // of the stop, so it is read from the box.
+      if(!FadeBox((datetime)PositionGetInteger(POSITION_TIME)))
+         return;
+      target1 = isBuy ? fadeBoxHi : fadeBoxLo;
+   }
+   else
+   {
+      double span = (tp > 0.0) ? MathAbs(tp - open) / InpTp2RangeMult
+                               : ((sl > 0.0) ? MathAbs(open - sl) : 0.0);
+      if(span <= 0.0)
+         return;
+      target1 = isBuy ? open + span * InpTp1RangeMult
+                      : open - span * InpTp1RangeMult;
+   }
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    if(bid <= 0.0 || ask <= 0.0)
@@ -1045,6 +1597,8 @@ void HandleFirstTarget(const ulong ticket)
       return;
 
    double breakEven = NormalizePrice(open);
+   if(sl > 0.0 && ((isBuy && sl >= breakEven - halfPoint) || (!isBuy && sl <= breakEven + halfPoint)))
+      return;                                    // InpBreakEvenPoints already did better
    if(trade.PositionModify(ticket, breakEven, tp))
       PrintFormat("%s: stop moved to entry %.*f on #%I64u.", InpComment, _Digits, breakEven, ticket);
    else
@@ -1656,7 +2210,7 @@ int NewRecord(const int s, const int dir, const double entry, const double stop,
    records[n].ukSignal  = ServerToUk(barTime);
    records[n].session   = s;
    records[n].dir       = dir;
-   records[n].mode      = ModeTag();
+   records[n].mode      = (s == SESSION_FADE) ? "FADE" : ModeTag();
    records[n].boxHi     = boxHi;
    records[n].boxLo     = boxLo;
    records[n].entry     = entry;

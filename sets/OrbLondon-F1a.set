@@ -1,0 +1,6 @@
+; OrbLondon 1.14 variant F1a, XAUUSD M5. Inputs not listed keep their defaults.
+; Live baseline: NY last entry 16:00 UK, NY flat 18:00 UK.
+InpNYLastEntry=16:00
+InpNYFlatTime=18:00
+InpLidFade=true
+InpLidFadeWindow=6
