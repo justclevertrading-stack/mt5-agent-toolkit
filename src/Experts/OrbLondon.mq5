@@ -34,7 +34,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.14"
+#property version   "1.15"
 #property description "London and New York opening range breakout, M5. Built on XAUUSD, range filter in points."
 
 #include <Trade\Trade.mqh>
@@ -73,7 +73,9 @@ input int    InpFlattenHour      = 20;      // Close everything at this UK hour
 input int    InpFlattenMinute    = 0;       // Close everything at this UK minute
 
 input group "=== Sessions traded ===";
-input bool   InpTradeLondon      = true;    // Trade the London box
+// Off by default since 1.15: London lost money or broke even in every
+// 2023-2025 test (strategies/lid-fade-results.md). Set true to trade it again.
+input bool   InpTradeLondon      = false;   // Trade the London box
 input bool   InpTradeNY          = true;    // Trade the New York box
 input string InpNYStart          = "13:30"; // NY box starts, UK time HH:MM
 // Empty means InpNYStart + InpRangeMinutes, so moving the start to 14:30 moves
