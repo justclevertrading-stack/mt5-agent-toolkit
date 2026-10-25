@@ -145,6 +145,15 @@ input group "=== NY split. Off by default, except the cash-open skip ===";
 // minutes later. Move InpCashOpenUK when UK and US clocks are out of step.
 input bool   InpSkipCashOpenBar  = true;    // Never enter in the M5 bar opening at InpCashOpenUK
 input string InpCashOpenUK       = "14:30"; // US cash open, UK time HH:MM
+// Chop filter, New York only: the high to low from InpChopStartUK to the NY
+// box start, against the box height. A morning that already travelled more
+// than InpChopMult boxes skips the NY box that day.
+input bool   InpChopFilter       = false;   // Skip the NY box after a wide morning
+input double InpChopMult         = 3.0;     // Skip when the morning range is above this many box heights
+input string InpChopStartUK      = "06:00"; // Morning range starts, UK time HH:MM
+// Both sessions: a box smaller than this share of ATR(14) on H1, read on the
+// last H1 bar closed when the box locks, is skipped.
+input double InpMinBoxAtrPct     = 0.0;     // Skip a box below this % of H1 ATR(14), 0 = off
 
 input group "=== Lid fade, London only. Off by default ===";
 // Arms when the London first-break trade fails: its stop is hit at a loss, or
@@ -233,6 +242,9 @@ int      nyBoxEnd    = 0;
 int      nyLastEntry = 0;
 int      nyFlatten   = 0;
 int      cashOpenMinute = -1;       // InpCashOpenUK in minutes, -1 when the skip is off
+int      chopStartMinute = 0;       // InpChopStartUK in minutes
+int      atrHandle   = INVALID_HANDLE;   // H1 ATR(14) for InpMinBoxAtrPct
+datetime filterLoggedDay[SESSION_COUNT]; // UK day a chop or ATR skip was logged
 
 //+------------------------------------------------------------------+
 //| Per session bookkeeping.                                          |
@@ -301,9 +313,10 @@ bool     csvHeaderChecked = false;
 
 //--- The opening range of the UK day the given bar belongs to, for the
 //--- window [startMinute, endMinute) of that day.
-//--- Returns false when the range candles are not all present.
+//--- Returns false when the range candles are not all present, unless needAll
+//--- is false, when any candle in the window is enough.
 bool ComputeBox(const datetime ukDay, const int startMinute, const int endMinute,
-                double &hi, double &lo)
+                double &hi, double &lo, const bool needAll = true)
 {
    int barMinutes  = PeriodSeconds(WORK_TF) / 60;
    int wanted      = (barMinutes > 0) ? (endMinute - startMinute) / barMinutes : 0;
@@ -340,7 +353,47 @@ bool ComputeBox(const datetime ukDay, const int startMinute, const int endMinute
       found++;
    }
 
-   return(found == wanted && hi > lo);
+   return((needAll ? found == wanted : found > 0) && hi > lo);
+}
+
+//--- InpChopFilter and InpMinBoxAtrPct. True when the box may be traded.
+//--- barTime and minute are the just-closed bar's server time and UK minute.
+bool BoxFiltersPass(const int s, const datetime ukDay, const datetime barTime,
+                    const int minute, const double span)
+{
+   string why = "";
+
+   if(InpChopFilter && s == SESSION_NY)
+   {
+      double mHi = 0.0, mLo = 0.0;
+      if(ComputeBox(ukDay, chopStartMinute, SessionBoxStart(s), mHi, mLo, false) &&
+         mHi - mLo > InpChopMult * span)
+         why = StringFormat("chop skip, %s to box start range %.*f is %.1f boxes, above %.1f",
+                            InpChopStartUK, _Digits, mHi - mLo, (mHi - mLo) / span, InpChopMult);
+   }
+
+   if(why == "" && InpMinBoxAtrPct > 0.0)
+   {
+      // The last H1 bar that had closed when the box locked.
+      datetime lockServer = (datetime)((long)barTime - (long)(minute - SessionBoxEnd(s)) * 60);
+      int shift = iBarShift(_Symbol, PERIOD_H1, lockServer, false);
+      double atr[];
+      if(shift < 0 || CopyBuffer(atrHandle, 0, shift + 1, 1, atr) < 1 || atr[0] <= 0.0)
+         why = "ATR skip, H1 ATR not available";
+      else if(span < atr[0] * InpMinBoxAtrPct / 100.0)
+         why = StringFormat("ATR skip, box %.*f is %.0f%% of H1 ATR(14) %.*f, below %.0f%%",
+                            _Digits, span, span / atr[0] * 100.0, _Digits, atr[0], InpMinBoxAtrPct);
+   }
+
+   if(why == "")
+      return(true);
+   if(filterLoggedDay[s] != ukDay)
+   {
+      filterLoggedDay[s] = ukDay;
+      PrintFormat("%s %s %s: %s, session skipped", InpComment, SessionTag(s),
+                  TimeToString(ukDay, TIME_DATE), why);
+   }
+   return(false);
 }
 
 //--- The box of the session the given bar belongs to.
@@ -573,6 +626,9 @@ bool DetectSignal(const int s)
       LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.*f (%d points)",
                                             _Digits, lo, _Digits, hi, _Digits, span, spanPoints));
    }
+
+   if(!BoxFiltersPass(s, ukDay, barTime, minute, span))
+      return(false);
 
    // The candle judged as the break. With InpBreakMustHold it is the one
    // before the candle that has just closed, which must itself be after the
@@ -867,6 +923,26 @@ int OnInit()
       Print("InpCashOpenUK must read HH:MM.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+   if(InpChopFilter && (InpChopMult <= 0.0 || !ParseUkTime(InpChopStartUK, chopStartMinute) ||
+                        chopStartMinute >= nyBoxStart))
+   {
+      Print("InpChopMult must be above zero and InpChopStartUK an HH:MM before InpNYStart.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpMinBoxAtrPct < 0.0)
+   {
+      Print("InpMinBoxAtrPct must not be negative.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpMinBoxAtrPct > 0.0)
+   {
+      atrHandle = iATR(_Symbol, PERIOD_H1, 14);
+      if(atrHandle == INVALID_HANDLE)
+      {
+         Print("Failed to create the H1 ATR handle, error ", GetLastError());
+         return(INIT_FAILED);
+      }
+   }
 
    fastHandle = iMA(_Symbol, InpEmaTimeframe, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
    slowHandle = iMA(_Symbol, InpEmaTimeframe, InpSlowEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
@@ -947,6 +1023,7 @@ void OnDeinit(const int reason)
    if(slowHandle != INVALID_HANDLE) IndicatorRelease(slowHandle);
    if(exitFastHandle != INVALID_HANDLE) IndicatorRelease(exitFastHandle);
    if(exitSlowHandle != INVALID_HANDLE) IndicatorRelease(exitSlowHandle);
+   if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    // Never close positions here. OnDeinit also runs on recompile and on a
    // chart template change, and closing then would be a disaster.
 }
