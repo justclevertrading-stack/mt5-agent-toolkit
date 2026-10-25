@@ -255,3 +255,41 @@ bar is retried on the next candle. Verified in `OrbRichard.mq5` (2026-10-11):
 2025-02-25 NY read the 12:00 UK H1 bar at 13:45 UK.
 
 **Recorded:** 2026-10-11
+
+## Never enter inside one specific bar (a cash open, a data release)
+
+An EA that enters at market on the open of the bar after its signal candle
+sends the order inside bar N when the signal candle is bar N-1. So "do not
+open in the 14:30 bar" means "do not act on the candle that **closes** at
+14:30". Compare the candle's UK open minute plus its length with the event:
+
+```mql5
+int cashOpenMinute = -1;   // parsed from an "HH:MM" input in OnInit, -1 when off
+
+bool IsCashOpenSignalCandle(const int bar)
+{
+   if(cashOpenMinute < 0)
+      return(false);
+   datetime t = iTime(_Symbol, PERIOD_M5, bar);
+   if(t <= 0)
+      return(false);
+   int barMinutes = PeriodSeconds(PERIOD_M5) / 60;
+   return(UkMinuteOfDay(ServerToUk(t)) + barMinutes == cashOpenMinute);
+}
+```
+
+If the strategy only takes the first break of a level, also skip such a
+candle in the "was there an earlier break?" scan. Otherwise the deferred
+candle uses up the side and the next close beyond is refused as a second
+break. Skipped this way, the decision moves to the event bar's own close and
+the trade is deferred, not lost. OrbLondon 1.16 kept the same trade count in
+every year it was tested.
+
+A fixed UK time is wrong for the US cash open in the weeks the two
+countries' clocks are out of step (about three in March, one around the end
+of October). Make the time an input.
+
+Verified in `OrbLondon.mq5` 1.16 (2026-10-25): the journal shows "cash-open
+skip" on 14:25 UK candles, for example DJ30.i 2025-09-04.
+
+**Recorded:** 2026-10-25

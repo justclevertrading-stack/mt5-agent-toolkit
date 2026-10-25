@@ -237,6 +237,24 @@ function of the source. If a backtest is ever run by another route, check that
 the inputs shown at the top of the report are the ones intended. Two runs whose
 input lists differ are not a comparison.
 
+### The tester runs its own copy of the `.ex5`, not the one you just built
+
+`compile.ps1` writes the `.ex5` next to the source in `src\Experts`.
+`backtest.ps1` runs `<dataFolder>\MQL5\Experts\<name>.ex5`, which on the
+backtest-only install `C:\MT5-Backtest` is a separate copy. Recompiling does
+not update it. Copy the build across before every batch:
+
+```powershell
+Copy-Item src\Experts\OrbLondon.ex5 C:\MT5-Backtest\MQL5\Experts\OrbLondon.ex5 -Force
+```
+
+Symptom: a new rule that is on by default gives results identical to the
+baseline **to the cent** in every run. Measured 2026-10-25: twelve OrbLondon
+1.16 runs with a new cash-open skip matched 1.15 exactly; the tester's copy
+was a week old. After copying, the same runs changed in every year. A new
+filter that changes nothing at all is a deployment fault until the journal
+shows its log line firing.
+
 ## When there is no report at all
 
 A missing report is not a strategy problem and must not be diagnosed as one.
