@@ -109,3 +109,80 @@ throughout.
 **Neither symbol passes.** Gold is the steadier of the two on drawdown, under
 10% in all three years, so its only problem is PF. The Dow has the best single
 year (2025) but fails 2024 on both PF and drawdown.
+
+## Job 3: chop filter (C2, C3, C4) and minimum box against ATR (A30)
+
+**Rules.** All on top of S0.
+- `InpChopFilter` (default false), `InpChopMult` (default 3.0),
+  `InpChopStartUK` (default `"06:00"`): the high to low of the M5 candles
+  from 06:00 UK up to the NY box start (13:30) is measured; when it is more
+  than `InpChopMult` box heights, the NY box is skipped that day. Missing
+  candles in the window are tolerated. New York only. Logged "chop skip".
+- `InpMinBoxAtrPct` (default 0 = off): a box smaller than that percent of
+  ATR(14) on H1 is skipped. The ATR is read on the last H1 bar that had
+  closed when the box locked (the 12:00-13:00 UK bar for the 13:30-13:45
+  box), so it cannot change during the session. Applies to both sessions.
+  Logged "ATR skip".
+
+**XAUUSD**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| S0 | 2023 | 94 | 54.3 | 1.34 | +1030.42 | 4.35% | yes |
+| S0 | 2024 | 110 | 52.7 | 1.05 | +197.52 | 9.11% | no |
+| S0 | 2025 | 107 | 59.8 | 1.24 | +897.30 | 8.33% | no |
+| C2 | 2023 | 72 | 58.3 | 1.73 | +1347.86 | 2.36% | yes |
+| C2 | 2024 | 60 | 58.3 | 1.43 | +729.53 | 5.39% | yes |
+| C2 | 2025 | 25 | 40.0 | 0.74 | -282.93 | 6.65% | no |
+| C3 | 2023 | 86 | 55.8 | 1.50 | +1282.87 | 2.92% | yes |
+| C3 | 2024 | 85 | 57.6 | 1.42 | +1084.79 | 4.09% | yes |
+| C3 | 2025 | 53 | 52.8 | 0.96 | -84.73 | 8.84% | no |
+| C4 | 2023 | 91 | 54.9 | 1.38 | +1101.41 | 3.96% | yes |
+| C4 | 2024 | 99 | 56.6 | 1.28 | +885.65 | 5.87% | no |
+| C4 | 2025 | 72 | 54.2 | 1.06 | +161.14 | 11.39% | no |
+| A30 | 2023 | 94 | 54.3 | 1.34 | +1030.42 | 4.35% | yes |
+| A30 | 2024 | 110 | 52.7 | 1.05 | +197.52 | 9.11% | no |
+| A30 | 2025 | 106 | 59.4 | 1.22 | +849.38 | 8.33% | no |
+
+**DJ30.i**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| S0 | 2023 | 155 | 56.8 | 1.14 | +942.93 | 6.56% | no |
+| S0 | 2024 | 159 | 56.0 | 1.02 | +100.52 | 13.36% | no |
+| S0 | 2025 | 115 | 62.6 | 1.38 | +1710.57 | 6.88% | yes |
+| C2 | 2023 | 52 | 55.8 | 1.04 | +78.28 | 8.05% | no |
+| C2 | 2024 | 59 | 49.2 | 0.86 | -359.03 | 9.77% | no |
+| C2 | 2025 | 20 | 60.0 | 1.54 | +375.49 | 3.69% | yes |
+| C3 | 2023 | 87 | 57.5 | 1.21 | +725.62 | 7.66% | no |
+| C3 | 2024 | 100 | 54.0 | 1.04 | +184.33 | 11.79% | no |
+| C3 | 2025 | 39 | 56.4 | 1.07 | +104.94 | 5.75% | no |
+| C4 | 2023 | 119 | 58.8 | 1.26 | +1260.08 | 6.41% | no |
+| C4 | 2024 | 126 | 55.6 | 0.99 | -28.27 | 13.55% | no |
+| C4 | 2025 | 64 | 60.9 | 1.21 | +527.87 | 6.47% | no |
+| A30 | 2023 | 155 | 56.8 | 1.14 | +942.93 | 6.56% | no |
+| A30 | 2024 | 159 | 56.0 | 1.02 | +100.52 | 13.36% | no |
+| A30 | 2025 | 115 | 62.6 | 1.38 | +1710.57 | 6.88% | yes |
+
+**Verdict.**
+- **C2, XAUUSD: fails.** The best 2023 and 2024 of the whole batch (PF 1.73
+  and 1.43, DD under 6%), then 2025 collapses to 25 trades at PF 0.74. In
+  2025's strongly trending gold, most mornings were wider than two NY boxes,
+  so the filter removed most of the year and kept the losers.
+- **C3, XAUUSD: fails, nearest miss on gold.** 2023 PF 1.50 and 2024 PF 1.42,
+  both with drawdown under 5%, but 2025 is PF 0.96 on 53 trades. Two of three
+  years pass; the year that fails is the most recent one.
+- **C4, XAUUSD: fails.** Milder: 2023 passes, 2024 PF 1.28 just misses,
+  2025 PF 1.06 with an 11.39% drawdown.
+- **C2, C3, C4, DJ30.i: all fail.** The chop filter does not help the Dow:
+  every multiple makes 2024 worse or barely changes it, and C2 and C3 cut the
+  good 2025. Only C2 2025 passes, on 20 trades.
+- **A30, both symbols: fails, and is close to a no-op.** It skipped one
+  session in three years (gold, 2025-05-07). The points range filter
+  (500 points on gold, 3000 on the Dow) already removes nearly every box
+  smaller than 30% of H1 ATR.
+
+The chop result on gold is the most interesting of the batch, but it is a
+sign change in the most recent year rather than a weak year, and the
+multiple that does best (2 to 3) also discards the most trades. Treat it as
+a lead to re-test on 2022 and on 2025.10 onwards, not as an edge.
