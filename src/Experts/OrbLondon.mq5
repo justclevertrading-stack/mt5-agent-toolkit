@@ -154,6 +154,13 @@ input string InpChopStartUK      = "06:00"; // Morning range starts, UK time HH:
 // Both sessions: a box smaller than this share of ATR(14) on H1, read on the
 // last H1 bar closed when the box locks, is skipped.
 input double InpMinBoxAtrPct     = 0.0;     // Skip a box below this % of H1 ATR(14), 0 = off
+// Retest-only entry, BREAK mode. The first close beyond an edge (EMA agreeing)
+// arms a setup but is not entered. The first later close that is still beyond
+// that edge by no more than InpRetestTolerance is entered at market. A setup is
+// cancelled once price runs more than one box height beyond the edge first.
+// The tolerance is in price units ($1.00 on XAUUSD, 1 index point on DJ30.i).
+input bool   InpRetestOnly       = false;   // Enter on a retest close at the broken edge, not on the break
+input double InpRetestTolerance  = 1.0;     // Retest close within this distance of the edge, price units
 
 input group "=== Lid fade, London only. Off by default ===";
 // Arms when the London first-break trade fails: its stop is hit at a loss, or
@@ -222,6 +229,8 @@ bool     isHedging   = false;
 // Six are loaded: the SLOPE filter on a break-must-hold signal reads the
 // break candle at index 2 and the three bars before it, down to index 5.
 #define EMA_BARS       6
+// InpRetestOnly reads the EMA on a break candle up to a London session back.
+#define RETEST_EMA_BARS 64
 double   fastMA[];
 double   slowMA[];
 
@@ -630,6 +639,12 @@ bool DetectSignal(const int s)
    if(!BoxFiltersPass(s, ukDay, barTime, minute, span))
       return(false);
 
+   if(InpRetestOnly)
+   {
+      DetectRetestEntry(s, ukDay, boxEnd, hi, lo, span, midpoint);
+      return(CashOpenAllows(s));
+   }
+
    // The candle judged as the break. With InpBreakMustHold it is the one
    // before the candle that has just closed, which must itself be after the
    // box on the same UK day.
@@ -707,6 +722,13 @@ bool DetectSignal(const int s)
                                 (InpStopAtMidpoint ? "midpoint" : "far side"));
    }
 
+   return(CashOpenAllows(s));
+}
+
+//--- InpSkipCashOpenBar: drop a signal whose entry would fall in the cash-open
+//--- bar. Returns true when signalDir is still set.
+bool CashOpenAllows(const int s)
+{
    if(signalDir != 0 && IsCashOpenSignalCandle(1))
    {
       PrintFormat("%s %s: cash-open skip. %s, but the entry would fall in the %s UK bar. "
@@ -714,8 +736,88 @@ bool DetectSignal(const int s)
                   InpComment, SessionTag(s), signalWhy, InpCashOpenUK);
       signalDir = 0;
    }
-
    return(signalDir != 0);
+}
+
+//--- Is close c a retest close for side dir: beyond the edge, by no more
+//--- than InpRetestTolerance?
+bool IsRetestClose(const int dir, const double c, const double hi, const double lo)
+{
+   if(dir > 0)
+      return(c > hi && c - hi <= InpRetestTolerance);
+   return(c < lo && lo - c <= InpRetestTolerance);
+}
+
+//--- InpRetestOnly: is the candle that has just closed (index 1) the first
+//--- retest close of a live setup? Sets signalDir and the rest when it is.
+void DetectRetestEntry(const int s, const datetime ukDay, const int boxEnd,
+                       const double hi, const double lo, const double span,
+                       const double midpoint)
+{
+   double c1 = iClose(_Symbol, WORK_TF, 1);
+
+   for(int k = 0; k < 2; k++)
+   {
+      int dir = (k == 0) ? 1 : -1;
+      if(!IsRetestClose(dir, c1, hi, lo))
+         continue;
+
+      // The setup: the session's first close beyond this edge, older than
+      // the candle being judged. Walking back, so the last hit is the first.
+      int b = -1;
+      for(int i = 2; i < RETEST_EMA_BARS - 4; i++)
+      {
+         datetime t = iTime(_Symbol, WORK_TF, i);
+         if(t <= 0)
+            break;
+         datetime uk = ServerToUk(t);
+         if(UkDayOf(uk) != ukDay || UkMinuteOfDay(uk) < boxEnd)
+            break;
+         double c = iClose(_Symbol, WORK_TF, i);
+         if((dir > 0 && c > hi) || (dir < 0 && c < lo))
+            b = i;
+      }
+      if(b < 0)
+         continue;                            // candle 1 is the break itself, not entered
+
+      double breakClose = iClose(_Symbol, WORK_TF, b);
+      if(!EmaAgrees(s, dir, b, breakClose, hi, lo))
+         continue;
+
+      // From the break candle on: cancelled if price ran more than one box
+      // beyond the edge, used up if an earlier candle was already the retest.
+      bool cancelled = false, used = false;
+      for(int i = b; i >= 2 && !cancelled && !used; i--)
+      {
+         if(dir > 0 && iHigh(_Symbol, WORK_TF, i) > hi + span) cancelled = true;
+         if(dir < 0 && iLow(_Symbol, WORK_TF, i)  < lo - span) cancelled = true;
+         if(!cancelled && i < b && !IsCashOpenSignalCandle(i) &&
+            IsRetestClose(dir, iClose(_Symbol, WORK_TF, i), hi, lo))
+            used = true;
+      }
+      if(cancelled)
+      {
+         PrintFormat("%s %s: retest close %.*f, but the %s setup was cancelled: price ran more than "
+                     "one box (%.*f) beyond the edge first. No trade.",
+                     InpComment, SessionTag(s), _Digits, c1, (dir > 0 ? "long" : "short"), _Digits, span);
+         continue;
+      }
+      if(used)
+         continue;
+
+      signalDir  = dir;
+      signalStop = InpStopAtMidpoint ? midpoint : (dir > 0 ? lo : hi);
+      signalSpan = span;
+      signalHi   = hi;
+      signalLo   = lo;
+      signalWhy  = StringFormat("retest close %.*f within %.2f of range %s %.*f after the break "
+                                "close %.*f at %s UK, stop at the %s",
+                                _Digits, c1, InpRetestTolerance, (dir > 0 ? "high" : "low"),
+                                _Digits, (dir > 0 ? hi : lo), _Digits, breakClose,
+                                TimeToString(ServerToUk(iTime(_Symbol, WORK_TF, b)), TIME_MINUTES),
+                                (InpStopAtMidpoint ? "midpoint" : "far side"));
+      return;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -929,6 +1031,11 @@ int OnInit()
       Print("InpChopMult must be above zero and InpChopStartUK an HH:MM before InpNYStart.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+   if(InpRetestOnly && (InpEntryMode != ENTRY_BREAK || InpRetestTolerance <= 0.0))
+   {
+      Print("InpRetestOnly needs InpEntryMode = BREAK and InpRetestTolerance above zero.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
    if(InpMinBoxAtrPct < 0.0)
    {
       Print("InpMinBoxAtrPct must not be negative.");
@@ -1101,8 +1208,9 @@ void OnTick()
 //+------------------------------------------------------------------+
 bool RefreshIndicators()
 {
-   if(CopyBuffer(fastHandle, 0, 0, EMA_BARS, fastMA) < EMA_BARS) return(false);
-   if(CopyBuffer(slowHandle, 0, 0, EMA_BARS, slowMA) < EMA_BARS) return(false);
+   int bars = InpRetestOnly ? RETEST_EMA_BARS : EMA_BARS;
+   if(CopyBuffer(fastHandle, 0, 0, bars, fastMA) < bars) return(false);
+   if(CopyBuffer(slowHandle, 0, 0, bars, slowMA) < bars) return(false);
    return(true);
 }
 
