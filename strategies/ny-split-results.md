@@ -186,3 +186,154 @@ The chop result on gold is the most interesting of the batch, but it is a
 sign change in the most recent year rather than a weak year, and the
 multiple that does best (2 to 3) also discards the most trades. Treat it as
 a lead to re-test on 2022 and on 2025.10 onwards, not as an edge.
+
+## Job 4: retest-only entry (R1, R1C3)
+
+**Rule.** `InpRetestOnly` (default false), `InpRetestTolerance` (default
+1.0). After the session's first M5 close beyond a box edge, with the EMA
+agreeing on that break candle, the break is not entered. The first later
+close that is still beyond the same edge by no more than the tolerance is
+entered at market. If any candle from the break onwards reaches more than
+one box height beyond the edge before that, the setup is cancelled (98
+cancellations logged over the 12 runs). Stop, TP1/TP2, last entry, flat and
+one trade per session are unchanged. The cash-open skip still applies to
+the entry candle. R1C3 adds the chop filter at 3x.
+
+**Assumption: tolerance in price units.** The brief says "1.0 points". In this
+EA a point is the symbol's `_Point`, $0.01 on gold and 0.01 index points on
+the Dow; a close within one cent of the edge would almost never happen. So
+1.0 is read as price: $1.00 on XAUUSD, 1 index point on DJ30.i. That is
+about a tenth of a typical gold box, but only about 2% of a typical Dow box
+(median 44 to 52 points). That is why the Dow takes so few trades.
+
+Checked in the journal: XAUUSD 2023-01-18, break close 1916.10 below the box
+low 1916.19 at 15:10 UK; the 17:15 UK candle closed at 1915.27, 0.92 under
+the edge, and the short was entered.
+
+**XAUUSD**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| R1 | 2023 | 58 | 46.6 | 0.88 | -246.48 | 7.13% | no |
+| R1 | 2024 | 71 | 56.3 | 1.15 | +351.26 | 5.05% | no |
+| R1 | 2025 | 46 | 45.7 | 0.80 | -459.09 | 8.15% | no |
+| R1C3 | 2023 | 55 | 49.1 | 1.04 | +66.48 | 4.73% | no |
+| R1C3 | 2024 | 53 | 62.3 | 1.61 | +883.28 | 3.89% | yes |
+| R1C3 | 2025 | 23 | 39.1 | 0.54 | -548.35 | 7.17% | no |
+
+**DJ30.i**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| R1 | 2023 | 14 | 64.3 | 2.06 | +463.81 | 3.00% | yes |
+| R1 | 2024 | 17 | 58.8 | 1.69 | +435.96 | 3.06% | yes |
+| R1 | 2025 | 2 | 50.0 | 1.46 | +45.91 | 1.80% | yes |
+| R1C3 | 2023 | 9 | 66.7 | 3.06 | +485.46 | 1.96% | yes |
+| R1C3 | 2024 | 7 | 57.1 | 1.95 | +219.47 | 2.06% | yes |
+| R1C3 | 2025 | 0 | - | - | 0.00 | 0.00% | no |
+
+**Verdict.**
+- **R1, XAUUSD: fails.** Worse than S0 in 2023 and 2025 (PF 0.88 and 0.80).
+  Waiting for the retest misses the breaks that run, and those are the winners.
+- **R1C3, XAUUSD: fails.** 2024 is good (PF 1.61) but 2025 is PF 0.54 on 23
+  trades.
+- **R1, DJ30.i: passes the bar on paper, but the sample is far too small to
+  mean anything.** PF 2.06 / 1.69 / 1.46 with drawdown at or under about 3%,
+  but on 14, 17 and **2** trades. Two trades cannot show a profit factor, and
+  33 trades over 2.75 years cannot tell an edge from luck. It passes only
+  because the 1-point tolerance lets almost nothing through.
+- **R1C3, DJ30.i: fails.** No trades at all in 2025.
+
+## Job 5: EmaPullback, a separate EA (E1H, E4H, E1H-NY)
+
+`src/Experts/EmaPullback.mq5`, built from `templates/EA_Template.mq5`.
+Compiled with 0 errors and 0 warnings on the first attempt.
+
+**Rules as built.**
+- Trend on the chart timeframe: long needs close > EMA200 and EMA50 > EMA200,
+  short the mirror.
+- **Long:** the bar's low is at or below EMA50 x (1 + 0.3%), so it came
+  within 0.3% of EMA50 or went through it; RSI(14) is 40 to 55 inclusive; the
+  bar closes above EMA50.
+- **Short:** the bar's high is at or above EMA50 x (1 - 0.3%); RSI 45 to 60;
+  the bar closes below EMA50.
+- Entry at market on the next bar's first tick, i.e. at the close.
+- Stop: lowest low (highest high) of the last 5 closed bars, the signal bar
+  included. TP = 1.5 x the actual entry-to-stop distance. No other exit.
+- One position at a time. At least 12 bars between entries, counted from the
+  last entry deal in history (restart-safe). Fixed 0.1 lot. Spread cap 50
+  points. No session filter.
+- **E1H-NY:** `InpUseTimeWindow=true`, entries only from 12:00 to 19:59 UK
+  (server time converted with the EU DST calendar, as in OrbLondon). Exits
+  are not time-limited.
+- A stop inside the broker's stops level is refused rather than widened.
+
+**Assumption: fixed lot.** The repository rule is percent-of-balance sizing.
+The brief asks for a fixed 0.1 lot, so `InpFixedLot=0.1` is the default, and
+`InpFixedLot=0` switches to `InpRiskPercent` sizing. With a fixed lot, the
+money at risk per trade varies with the stop width, so drawdowns here are
+not comparable with the 1%-risk OrbLondon runs.
+
+Trades, win %, PF and net come from the report; the EA closes each position
+in one deal, so report trades are positions.
+
+**XAUUSD**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| E1H | 2023 | 220 | 42.3 | 1.17 | +855.02 | 9.93% | no |
+| E1H | 2024 | 203 | 38.4 | 0.91 | -620.57 | 17.72% | no |
+| E1H | 2025 | 147 | 36.1 | 1.02 | +144.92 | 19.63% | no |
+| E4H | 2023 | 45 | 48.9 | 1.68 | +1193.46 | 5.82% | yes |
+| E4H | 2024 | 46 | 34.8 | 0.82 | -758.65 | 20.29% | no |
+| E4H | 2025 | 33 | 45.5 | 1.52 | +1895.45 | 10.64% | no |
+| E1H-NY | 2023 | 149 | 40.9 | 1.10 | +365.14 | 9.25% | no |
+| E1H-NY | 2024 | 134 | 44.8 | 1.23 | +1079.79 | 12.91% | no |
+| E1H-NY | 2025 | 92 | 35.9 | 0.78 | -1582.93 | 31.04% | no |
+
+**Verdict.**
+- **E1H: fails.** PF 1.17 / 0.91 / 1.02, with drawdowns near 18-20% in 2024
+  and 2025. The win rate (36-42%) is too low for a 1.5R target.
+- **E4H: fails.** It has the best years of the job (2023 PF 1.68, 2025 PF
+  1.52), but 2024 is PF 0.82 with a 20.29% drawdown, and 2025's drawdown is
+  10.64%. 33 to 46 trades a year.
+- **E1H-NY: fails.** The time window helps 2024 (PF 1.23) and costs 2025 badly
+  (PF 0.78, 31.04% drawdown). The fixed 0.1 lot with wide H1 stops at 2025
+  gold prices is part of that drawdown.
+
+## Job 6: 9 EMA + VWAP V1/V2/V3: skipped
+
+No specification found. A case-insensitive search for "VWAP" across the
+whole repository, `strategies/` included, returns nothing. Nothing was built
+or run.
+
+## What passes
+
+**On the letter of the bar, one combination: R1 (retest-only entry) on
+DJ30.i**, at PF 2.06 / 1.69 / 1.46 and max DD 3.00% / 3.06% / 1.80%.
+
+It should not be treated as a pass. It made 14, 17 and 2 trades. The 2025
+"PF 1.46" is one winner and one loser. The count is small because the
+retest tolerance (1 index point, see Job 4) is about 2% of a typical Dow box.
+A fair test of the idea needs a tolerance scaled to the box (for example a
+fraction of its height) and enough trades to judge, at least 30 a year.
+
+Nothing else clears the bar on either symbol. The nearest real candidate is
+**C3 on XAUUSD** (chop filter at 3x): PF 1.50 and 1.42 with drawdown under 5%
+in 2023 and 2024, but PF 0.96 in 2025.
+
+Nothing here justifies changing the live settings. The only new default,
+`InpSkipCashOpenBar=true`, changes the live build when it is recompiled. On
+gold it cut drawdown in every year and cost at most $4 (2025); on the Dow it
+helped 2023 and 2025 but cost $267 in 2024 (+367.65 to +100.52). Set it false
+to keep 1.15 behaviour exactly.
+
+## Caveats
+
+- One broker's data, commission 0, model 1 (not real ticks).
+- The variants were chosen in advance by the brief, but several were
+  compared on the same three years. The best of nine variants on one sample
+  will look better than it is.
+- `InpCashOpenUK` stays at 14:30 all year, so in the weeks UK and US clocks
+  are out of step the skip lands an hour after the real cash open.
+- None of this is a recommendation to trade.
