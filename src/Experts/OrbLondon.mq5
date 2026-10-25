@@ -34,7 +34,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.15"
+#property version   "1.16"
 #property description "London and New York opening range breakout, M5. Built on XAUUSD, range filter in points."
 
 #include <Trade\Trade.mqh>
@@ -138,6 +138,14 @@ input bool   InpBreakMustHold    = false;   // Require the candle after the brea
 // candle does not count as the first break. Both sessions alike.
 input double InpBigBreakSkipPct  = 0.0;     // Skip a break candle above this % of the box height, 0 = off
 
+input group "=== NY split. Off by default, except the cash-open skip ===";
+// No entry is sent inside the M5 bar that opens at the US cash open. A break
+// candle that closes at InpCashOpenUK is not entered and does not count as the
+// first break: the decision waits for the cash-open bar's own close, five
+// minutes later. Move InpCashOpenUK when UK and US clocks are out of step.
+input bool   InpSkipCashOpenBar  = true;    // Never enter in the M5 bar opening at InpCashOpenUK
+input string InpCashOpenUK       = "14:30"; // US cash open, UK time HH:MM
+
 input group "=== Lid fade, London only. Off by default ===";
 // Arms when the London first-break trade fails: its stop is hit at a loss, or
 // within InpLidFadeWindow candles of the break a candle closes back inside.
@@ -224,6 +232,7 @@ int      nyBoxStart  = 0;           // minutes into the UK day
 int      nyBoxEnd    = 0;
 int      nyLastEntry = 0;
 int      nyFlatten   = 0;
+int      cashOpenMinute = -1;       // InpCashOpenUK in minutes, -1 when the skip is off
 
 //+------------------------------------------------------------------+
 //| Per session bookkeeping.                                          |
@@ -367,6 +376,8 @@ bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool
          continue;
       if(IsBigBreakCandle(i, hi - lo))
          continue;                            // skipped as too big, never the first break
+      if(IsCashOpenSignalCandle(i))
+         continue;                            // its entry would fall in the cash-open bar
       if((above && c > hi) || (!above && c < lo))
          firstUk = uk;                        // walking back, so the last hit is the first
    }
@@ -382,6 +393,19 @@ bool IsBigBreakCandle(const int bar, const double span)
    double h = iHigh(_Symbol, WORK_TF, bar);
    double l = iLow(_Symbol, WORK_TF, bar);
    return(h - l > span * InpBigBreakSkipPct / 100.0);
+}
+
+//--- InpSkipCashOpenBar: does the candle at index bar close at the cash open,
+//--- so that entering on it would send the order inside the cash-open bar?
+bool IsCashOpenSignalCandle(const int bar)
+{
+   if(cashOpenMinute < 0)
+      return(false);
+   datetime t = iTime(_Symbol, WORK_TF, bar);
+   if(t <= 0)
+      return(false);
+   int barMinutes = PeriodSeconds(WORK_TF) / 60;
+   return(UkMinuteOfDay(ServerToUk(t)) + barMinutes == cashOpenMinute);
 }
 
 //--- Log a break candle skipped for its size. The next close beyond the
@@ -627,6 +651,14 @@ bool DetectSignal(const int s)
                                 (InpStopAtMidpoint ? "midpoint" : "far side"));
    }
 
+   if(signalDir != 0 && IsCashOpenSignalCandle(1))
+   {
+      PrintFormat("%s %s: cash-open skip. %s, but the entry would fall in the %s UK bar. "
+                  "Waiting for that bar's close.",
+                  InpComment, SessionTag(s), signalWhy, InpCashOpenUK);
+      signalDir = 0;
+   }
+
    return(signalDir != 0);
 }
 
@@ -827,6 +859,13 @@ int OnInit()
          Print("InpNYLastEntry and InpNYFlatTime must both be later than InpNYEnd.");
          return(INIT_PARAMETERS_INCORRECT);
       }
+   }
+
+   cashOpenMinute = -1;
+   if(InpSkipCashOpenBar && !ParseUkTime(InpCashOpenUK, cashOpenMinute))
+   {
+      Print("InpCashOpenUK must read HH:MM.");
+      return(INIT_PARAMETERS_INCORRECT);
    }
 
    fastHandle = iMA(_Symbol, InpEmaTimeframe, InpFastEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
