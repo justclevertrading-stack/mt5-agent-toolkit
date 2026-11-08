@@ -337,3 +337,72 @@ to keep 1.15 behaviour exactly.
 - `InpCashOpenUK` stays at 14:30 all year, so in the weeks UK and US clocks
   are out of step the skip lands an hour after the real cash open.
 - None of this is a recommendation to trade.
+
+## Job 7: S0-fixed (1.17), cash-open entry deferred instead of skipped
+
+Measured 2026-11-08, branch `ny-split` at `41265b6`, same install and tester
+settings as Job 1: NY only, box 13:30-13:45 UK, last entry 16:00,
+`InpNYFlatTime=18:00`, BREAK mode, `InpSkipCashOpenBar=true`, model 1,
+$10,000, 1% risk, commission 0; DJ30.i with `InpMinRangePoints=3000`,
+`InpMaxRangePoints=20000` and `InpMaxSpreadPoints=500` (passed explicitly,
+so `InpAutoHeightBySymbol` leaves them alone). Same years, 2025 ending
+09.26. The tester's 1.17 build was copied into `C:\MT5-Backtest\MQL5\Experts`
+before the runs. The reports show History Quality "n/a" this time (it was
+100% in Job 1); the bar counts match. Reports, CSVs and journals:
+`reports/nysplit-20261108-S0fixed-<XAUUSD|DJ30i>-<year>.*`.
+
+**What changed from 1.16.** In 1.16 the candle closing at 14:30 UK was not
+entered and did **not** count as the first break, so any later close beyond
+the same edge could still be the first break and be entered. In 1.17 that
+candle counts as the first break. Its entry is deferred to the 14:35 close
+and taken only if the cash-open bar also closes beyond the same edge. When
+the 14:35 candle holds, 1.16 and 1.17 take the same trade. They differ only
+when it closes back inside: 1.17 finishes that side, while 1.16 waited for
+another break.
+
+Deferrals counted in the journals (signal on the 14:25-14:30 candle; entered
+at 14:35, or failed back inside; the rest are days the 14:30 candle closed
+beyond the opposite edge):
+
+| | 2023 | 2024 | 2025 |
+|---|---|---|---|
+| XAUUSD deferred / entered / failed | 9 / 6 / 3 | 1 / 0 / 1 | 3 / 1 / 2 |
+| DJ30.i deferred / entered / failed | 11 / 5 / 4 | 19 / 13 / 3 | 5 / 2 / 2 |
+
+**XAUUSD**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| S0 | 2023 | 94 | 54.3 | 1.34 | +1030.42 | 4.35% | yes |
+| S0-fixed (1.17) | 2023 | 93 | 53.8 | 1.32 | +935.90 | 5.41% | yes |
+| S0 | 2024 | 110 | 52.7 | 1.05 | +197.52 | 9.11% | no |
+| S0-fixed (1.17) | 2024 | 110 | 52.7 | 1.05 | +197.52 | 9.11% | no |
+| S0 | 2025 | 107 | 59.8 | 1.24 | +897.30 | 8.33% | no |
+| S0-fixed (1.17) | 2025 | 106 | 60.4 | 1.27 | +1009.95 | 8.74% | no |
+
+**DJ30.i**
+
+| Variant | Year | Trades | Win % | PF | Net $ | Max DD | Year passes |
+|---|---|---|---|---|---|---|---|
+| S0 | 2023 | 155 | 56.8 | 1.14 | +942.93 | 6.56% | no |
+| S0-fixed (1.17) | 2023 | 152 | 57.2 | 1.15 | +998.37 | 6.23% | no |
+| S0 | 2024 | 159 | 56.0 | 1.02 | +100.52 | 13.36% | no |
+| S0-fixed (1.17) | 2024 | 157 | 56.1 | 1.04 | +231.75 | 12.30% | no |
+| S0 | 2025 | 115 | 62.6 | 1.38 | +1710.57 | 6.88% | yes |
+| S0-fixed (1.17) | 2025 | 113 | 61.9 | 1.36 | +1605.16 | 6.85% | yes |
+
+**Verdict.** The change is small, as it should be: it touches only the days
+a deferred break failed. That cost one to three trades a year (the later
+same-side breaks that 1.16 took). On the Dow it helped 2023 and 2024
+(+55 and +131) and cost 2025 (-105). On gold it cost 2023 (-94, drawdown
+4.35% to 5.41%), left 2024 unchanged and helped 2025 (+113). No year changes
+its pass or fail result, and neither symbol passes the bar.
+
+**4 Nov 2026, the live miss, replayed.** The live charts run
+`InpRetestOnly=true`, which these runs do not. Replaying 2026-11-02 to 11-06
+on XAUUSD with the live inputs gives the same box as the live journal
+(4030.42-4047.52). The first close beyond was the **14:35** candle at
+4048.71, $1.19 above the high, which is outside the $1.00 retest tolerance.
+That armed the setup without a retest close, and none came before 16:00. The
+cash-open bar was not involved. 1.16 had no log line for this path; 1.17
+prints `break LONG at 4048.71 not taken — retest-only pending`.
