@@ -17,6 +17,9 @@
 //| TP2        two box heights, for the remainder                     |
 //| Session    one trade per session, no entry after the session's    |
 //|            last entry time, flat at its own flatten time          |
+//| Cash open  a signal on the candle closing at InpCashOpenUK is     |
+//|            entered one bar later if that bar holds the break      |
+//| Journal    one "not taken" line per close beyond an active box    |
 //|                                                                   |
 //| The two sessions are independent. Each has its own magic number    |
 //| (NY is InpMagic + InpNyMagicOffset), its own one-trade-per-session |
@@ -34,7 +37,7 @@
 //| Specification: strategies/OrbLondon.md                            |
 //+------------------------------------------------------------------+
 #property copyright "MQL5 Workspace"
-#property version   "1.16"
+#property version   "1.17"
 #property description "London and New York opening range breakout, M5. Built on XAUUSD, range filter in points."
 
 #include <Trade\Trade.mqh>
@@ -102,6 +105,12 @@ input int    InpSlowEmaPeriod    = 21;      // Slow EMA period
 // defaults are $5 to $25 on Vantage XAUUSD, which quotes 2 digits (point 0.01).
 input int    InpMinRangePoints   = 500;     // Skip session below this range height, points
 input int    InpMaxRangePoints   = 2500;    // Skip session above this range height, points
+// DJ30.i and US30 quote in 0.01 index points, so 500 to 2500 points is only 5
+// to 25 index points and skips every Dow session. With this on, a symbol whose
+// name contains DJ30 or US30 uses 5000 to 40000 points (50 to 400 index
+// points) while both height inputs above are still at their defaults. Height
+// inputs changed by hand always win. The values used are logged in OnInit.
+input bool   InpAutoHeightBySymbol = true;  // Dow height bounds on DJ30/US30 while the height inputs are default
 input bool   InpFirstBreakOnly   = true;    // Only the first close beyond a side counts
 input double InpTp1RangeMult     = 1.0;     // TP1, range heights from entry
 input double InpTp2RangeMult     = 2.0;     // TP2, range heights from entry
@@ -139,10 +148,14 @@ input bool   InpBreakMustHold    = false;   // Require the candle after the brea
 input double InpBigBreakSkipPct  = 0.0;     // Skip a break candle above this % of the box height, 0 = off
 
 input group "=== NY split. Off by default, except the cash-open skip ===";
-// No entry is sent inside the M5 bar that opens at the US cash open. A break
-// candle that closes at InpCashOpenUK is not entered and does not count as the
-// first break: the decision waits for the cash-open bar's own close, five
-// minutes later. Move InpCashOpenUK when UK and US clocks are out of step.
+// No entry is sent inside the M5 bar that opens at the US cash open. A signal
+// on the candle that closes at InpCashOpenUK is deferred, not dropped: that
+// candle still counts as the first break, and the entry is taken at the close
+// of the cash-open bar itself, five minutes later, if that bar also closes
+// beyond the same edge (same stop and targets). If it closes back inside, the
+// break has failed and the usual rules apply: with InpFirstBreakOnly that side
+// is finished; with InpRetestOnly the setup waits for the next retest close.
+// Move InpCashOpenUK when UK and US clocks are out of step.
 input bool   InpSkipCashOpenBar  = true;    // Never enter in the M5 bar opening at InpCashOpenUK
 input string InpCashOpenUK       = "14:30"; // US cash open, UK time HH:MM
 // Chop filter, New York only: the high to low from InpChopStartUK to the NY
@@ -226,9 +239,10 @@ bool     isHedging   = false;
 // Indicator values for the last closed bars.
 // Index 1 is the most recently closed bar, index 2 the one before it.
 // Index 0 is the bar still forming and is deliberately not used.
-// Six are loaded: the SLOPE filter on a break-must-hold signal reads the
-// break candle at index 2 and the three bars before it, down to index 5.
-#define EMA_BARS       6
+// Seven are loaded: the SLOPE filter on a break-must-hold signal deferred
+// from the cash-open bar reads the break candle at index 3 and the three bars
+// before it, down to index 6.
+#define EMA_BARS       7
 // InpRetestOnly reads the EMA on a break candle up to a London session back.
 #define RETEST_EMA_BARS 64
 double   fastMA[];
@@ -254,6 +268,11 @@ int      cashOpenMinute = -1;       // InpCashOpenUK in minutes, -1 when the ski
 int      chopStartMinute = 0;       // InpChopStartUK in minutes
 int      atrHandle   = INVALID_HANDLE;   // H1 ATR(14) for InpMinBoxAtrPct
 datetime filterLoggedDay[SESSION_COUNT]; // UK day a chop or ATR skip was logged
+int      minRangePoints = 0;        // range height bounds in use, see InpAutoHeightBySymbol
+int      maxRangePoints = 0;
+// Why the bar that has just closed was not entered, for ReportUntakenBreak.
+// Reset per session per bar; the first gate that fails sets it.
+string   breakReason = "";
 
 //+------------------------------------------------------------------+
 //| Per session bookkeeping.                                          |
@@ -271,8 +290,7 @@ struct SessionState
    datetime openTime;
    double   risk;           // money at risk when the position opened
    string   exitTag;        // set immediately before a close this EA decides
-   datetime longFinishedDay;   // UK day the "long side finished" line was logged
-   datetime shortFinishedDay;  // UK day the "short side finished" line was logged
+   datetime noEntryLoggedDay;  // UK day the "no entry by" line was logged
 };
 
 SessionState sess[SESSION_COUNT];
@@ -396,6 +414,7 @@ bool BoxFiltersPass(const int s, const datetime ukDay, const datetime barTime,
 
    if(why == "")
       return(true);
+   SetBreakReason(StringFind(why, "chop") == 0 ? "chop filter" : "other (" + why + ")");
    if(filterLoggedDay[s] != ukDay)
    {
       filterLoggedDay[s] = ukDay;
@@ -438,8 +457,7 @@ bool IsFirstCloseBeyond(const datetime ukDay, const int boxEndMinute, const bool
          continue;
       if(IsBigBreakCandle(i, hi - lo))
          continue;                            // skipped as too big, never the first break
-      if(IsCashOpenSignalCandle(i))
-         continue;                            // its entry would fall in the cash-open bar
+      // A cash-open candle does count: its entry was deferred, not dropped.
       if((above && c > hi) || (!above && c < lo))
          firstUk = uk;                        // walking back, so the last hit is the first
    }
@@ -470,38 +488,23 @@ bool IsCashOpenSignalCandle(const int bar)
    return(UkMinuteOfDay(ServerToUk(t)) + barMinutes == cashOpenMinute);
 }
 
-//--- Log a break candle skipped for its size. The next close beyond the
-//--- same edge is tested again.
-void LogBigCandleSkip(const int s, const int dir, const int bar, const double span)
+//--- Record why this bar's close beyond the box is not entered. The first
+//--- gate to give a reason wins; ReportUntakenBreak prints it as one line.
+void SetBreakReason(const string why)
 {
-   PrintFormat("%s %s: big-candle skip. Close %s range %s, candle %.*f high to low is above %.0f%% of "
-               "the %.*f box. Waiting for the next close beyond.",
-               InpComment, SessionTag(s), (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
-               _Digits, iHigh(_Symbol, WORK_TF, bar) - iLow(_Symbol, WORK_TF, bar),
-               InpBigBreakSkipPct, _Digits, span);
+   if(breakReason == "")
+      breakReason = why;
 }
 
-//--- InpFirstBreakOnly: an earlier candle already closed beyond this side, so
-//--- the side is finished. Said once per side per session, because every
-//--- later candle beyond it fails the same way and the log should not repeat it.
-void LogSideFinished(const int s, const datetime ukDay, const int dir,
-                     const datetime firstUk, const double edge)
+//--- Forget a signal.
+void ClearSignal()
 {
-   if(dir > 0)
-   {
-      if(sess[s].longFinishedDay == ukDay) return;
-      sess[s].longFinishedDay = ukDay;
-   }
-   else
-   {
-      if(sess[s].shortFinishedDay == ukDay) return;
-      sess[s].shortFinishedDay = ukDay;
-   }
-   PrintFormat("%s %s: %s side finished for the session. The first close %s range %s %.*f "
-               "was the candle opening %s UK, and only the first break is taken.",
-               InpComment, SessionTag(s), (dir > 0 ? "long" : "short"),
-               (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
-               _Digits, edge, TimeToString(firstUk, TIME_MINUTES));
+   signalDir  = 0;
+   signalStop = 0.0;
+   signalSpan = 0.0;
+   signalHi   = 0.0;
+   signalLo   = 0.0;
+   signalWhy  = "";
 }
 
 //--- The trend filter this session uses.
@@ -513,13 +516,11 @@ ENUM_NY_EMA_FILTER EmaFilterOf(const int s)
 }
 
 //--- Does the trend filter agree with a break in direction dir, read on the
-//--- candle at index bar? Prints the reason when it does not.
-bool EmaAgrees(const int s, const int dir, const int bar, const double close,
-               const double hi, const double lo)
+//--- candle at index bar? A disagreement is reported as "trend filter".
+bool EmaAgrees(const int s, const int dir, const int bar)
 {
    ENUM_NY_EMA_FILTER filter = EmaFilterOf(s);
-   if(filter == NY_EMA_OFF)
-      return(true);
+   bool agrees = true;
 
    if(filter == NY_EMA_SLOPE)
    {
@@ -527,61 +528,34 @@ bool EmaAgrees(const int s, const int dir, const int bar, const double close,
                      fastMA[bar + 2] > fastMA[bar + 3];
       bool falling = fastMA[bar] < fastMA[bar + 1] && fastMA[bar + 1] < fastMA[bar + 2] &&
                      fastMA[bar + 2] < fastMA[bar + 3];
-      if((dir > 0 && rising) || (dir < 0 && falling))
-         return(true);
-      PrintFormat("%s %s: close %.*f %s range %s %.*f but %s EMA%d %.*f, %.*f, %.*f, %.*f is not %s. No trade.",
-                  InpComment, SessionTag(s), _Digits, close,
-                  (dir > 0 ? "above" : "below"), (dir > 0 ? "high" : "low"),
-                  _Digits, (dir > 0 ? hi : lo),
-                  EnumToString(InpEmaTimeframe), InpFastEmaPeriod,
-                  _Digits, fastMA[bar + 3], _Digits, fastMA[bar + 2],
-                  _Digits, fastMA[bar + 1], _Digits, fastMA[bar],
-                  (dir > 0 ? "rising" : "falling"));
-      return(false);
+      agrees = (dir > 0 && rising) || (dir < 0 && falling);
    }
+   else if(filter == NY_EMA_CROSS)
+      agrees = (dir > 0) ? fastMA[bar] > slowMA[bar] : fastMA[bar] < slowMA[bar];
 
-   if(dir > 0 && fastMA[bar] <= slowMA[bar])
-   {
-      PrintFormat("%s %s: close %.*f above range high %.*f but %s EMA%d %.*f is not above EMA%d %.*f. No trade.",
-                  InpComment, SessionTag(s), _Digits, close, _Digits, hi,
-                  EnumToString(InpEmaTimeframe),
-                  InpFastEmaPeriod, _Digits, fastMA[bar],
-                  InpSlowEmaPeriod, _Digits, slowMA[bar]);
-      return(false);
-   }
-   if(dir < 0 && fastMA[bar] >= slowMA[bar])
-   {
-      PrintFormat("%s %s: close %.*f below range low %.*f but %s EMA%d %.*f is not below EMA%d %.*f. No trade.",
-                  InpComment, SessionTag(s), _Digits, close, _Digits, lo,
-                  EnumToString(InpEmaTimeframe),
-                  InpFastEmaPeriod, _Digits, fastMA[bar],
-                  InpSlowEmaPeriod, _Digits, slowMA[bar]);
-      return(false);
-   }
-   return(true);
+   if(!agrees)
+      SetBreakReason("trend filter");
+   return(agrees);
 }
 
-//--- InpBreakMustHold: did the candle after the break also close beyond?
-bool BreakHeld(const int s, const int dir, const double hi, const double lo)
+//--- InpBreakMustHold: did the candle after the break, index 1 + lag, also
+//--- close beyond? Said in the journal only for the bar that has just closed.
+bool BreakHeld(const int s, const int dir, const double hi, const double lo, const int lag)
 {
-   double next = iClose(_Symbol, WORK_TF, 1);
+   double next = iClose(_Symbol, WORK_TF, 1 + lag);
    bool held = (dir > 0) ? (next > hi) : (next < lo);
-   if(!held)
+   if(!held && lag == 0)
       PrintFormat("%s %s: break %s the range did not hold, next close %.*f is back inside. No trade.",
                   InpComment, SessionTag(s), (dir > 0 ? "above" : "below"), _Digits, next);
    return(held);
 }
 
 //--- Look at the bar that has just closed and decide what to do for this
-//--- session. Returns true when signalDir is set.
+//--- session. Returns true when signalDir is set. When it returns false on a
+//--- bar that closed beyond the box, breakReason says why.
 bool DetectSignal(const int s)
 {
-   signalDir  = 0;
-   signalStop = 0.0;
-   signalSpan = 0.0;
-   signalHi   = 0.0;
-   signalLo   = 0.0;
-   signalWhy  = "";
+   ClearSignal();
 
    datetime barTime = iTime(_Symbol, WORK_TF, 1);
    if(barTime <= 0)
@@ -597,7 +571,10 @@ bool DetectSignal(const int s)
    if(minute < boxEnd)
       return(false);                           // box not locked yet
    if(minute >= lastEnry)
+   {
+      SetBreakReason("outside time window");
       return(false);                           // too late in the session
+   }
 
    double hi = 0.0, lo = 0.0;
    if(!ComputeBox(ukDay, SessionBoxStart(s), boxEnd, hi, lo))
@@ -614,6 +591,7 @@ bool DetectSignal(const int s)
       double pct = (midpoint > 0.0) ? span / midpoint * 100.0 : 0.0;
       if(pct < InpMinRangePct || pct > InpMaxRangePct)
       {
+         SetBreakReason("height");
          LogSessionOnce(s, ukDay, StringFormat("range %.*f is %.3f%% of %.*f, outside %.2f%% to %.2f%%, session skipped",
                                                _Digits, span, pct, _Digits, midpoint, InpMinRangePct, InpMaxRangePct));
          return(false);
@@ -626,10 +604,11 @@ bool DetectSignal(const int s)
       // Compared in price, against the bounds converted once, so a 2 digit
       // XAUUSD sees exactly the $5.00 and $25.00 it saw when these were dollars.
       int spanPoints = (int)MathRound(span / _Point);
-      if(span < InpMinRangePoints * _Point || span > InpMaxRangePoints * _Point)
+      if(span < minRangePoints * _Point || span > maxRangePoints * _Point)
       {
+         SetBreakReason("height");
          LogSessionOnce(s, ukDay, StringFormat("range %.*f (%d points) outside %d to %d points, session skipped",
-                                               _Digits, span, spanPoints, InpMinRangePoints, InpMaxRangePoints));
+                                               _Digits, span, spanPoints, minRangePoints, maxRangePoints));
          return(false);
       }
       LogSessionOnce(s, ukDay, StringFormat("range %.*f to %.*f, height %.*f (%d points)",
@@ -639,16 +618,58 @@ bool DetectSignal(const int s)
    if(!BoxFiltersPass(s, ukDay, barTime, minute, span))
       return(false);
 
+   // InpSkipCashOpenBar: a signal on the cash-open candle, now index 2, was
+   // deferred to this bar. Judge it again exactly as it was judged then, and
+   // enter now if this bar also closed beyond the same edge.
+   datetime prevUk = ServerToUk(iTime(_Symbol, WORK_TF, 2));
+   if(IsCashOpenSignalCandle(2) && UkDayOf(prevUk) == ukDay && UkMinuteOfDay(prevUk) >= boxEnd)
+   {
+      if(JudgeSignal(s, ukDay, boxEnd, hi, lo, span, midpoint, 1))
+      {
+         double c1 = iClose(_Symbol, WORK_TF, 1);
+         if((signalDir > 0 && c1 > hi) || (signalDir < 0 && c1 < lo))
+         {
+            signalWhy = StringFormat("%s, deferred from the %s UK cash-open bar, held with close %.*f",
+                                     signalWhy, InpCashOpenUK, _Digits, c1);
+            return(true);
+         }
+         if(c1 <= hi && c1 >= lo)
+            PrintFormat("%s %s: deferred %s break from the %s UK cash-open bar failed, close %.*f is "
+                        "back inside. No trade.", InpComment, SessionTag(s),
+                        (signalDir > 0 ? "LONG" : "SHORT"), InpCashOpenUK, _Digits, c1);
+      }
+      ClearSignal();
+      breakReason = "";                        // reasons above were about index 2
+   }
+
+   if(!JudgeSignal(s, ukDay, boxEnd, hi, lo, span, midpoint, 0))
+      return(false);
+
+   if(IsCashOpenSignalCandle(1))
+   {
+      SetBreakReason("cash-open bar (deferred)");
+      ClearSignal();
+      return(false);
+   }
+   return(true);
+}
+
+//--- Would a signal be entered at the close of the candle at index 1 + lag?
+//--- lag 0 is the bar that has just closed; lag 1 re-judges the one before it,
+//--- for a signal deferred from the cash-open bar. Sets signalDir and the rest.
+bool JudgeSignal(const int s, const datetime ukDay, const int boxEnd, const double hi,
+                 const double lo, const double span, const double midpoint, const int lag)
+{
    if(InpRetestOnly)
    {
-      DetectRetestEntry(s, ukDay, boxEnd, hi, lo, span, midpoint);
-      return(CashOpenAllows(s));
+      DetectRetestEntry(s, ukDay, boxEnd, hi, lo, span, midpoint, lag);
+      return(signalDir != 0);
    }
 
    // The candle judged as the break. With InpBreakMustHold it is the one
-   // before the candle that has just closed, which must itself be after the
-   // box on the same UK day.
-   int breakBar = InpBreakMustHold ? 2 : 1;
+   // before the entry candle, which must itself be after the box on the same
+   // UK day.
+   int breakBar = (InpBreakMustHold ? 2 : 1) + lag;
    if(InpBreakMustHold)
    {
       datetime breakUk = ServerToUk(iTime(_Symbol, WORK_TF, breakBar));
@@ -660,6 +681,10 @@ bool DetectSignal(const int s)
    if(close <= 0.0)
       return(false);
 
+   int dir = (close > hi) ? 1 : ((close < lo) ? -1 : 0);
+   if(dir == 0)
+      return(false);
+
    bool     emaOn   = (EmaFilterOf(s) != NY_EMA_OFF);
    datetime firstUk = 0;
 
@@ -667,76 +692,35 @@ bool DetectSignal(const int s)
    // a side for good, so when it fails the log must say so, not report an
    // EMA disagreement that no longer matters. Either order takes the same
    // trades; only the journal differs.
-   if(close > hi)
+   if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, dir > 0, hi, lo, breakBar, firstUk))
    {
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, true, hi, lo, breakBar, firstUk))
-      {
-         LogSideFinished(s, ukDay, 1, firstUk, hi);
-         return(false);
-      }
-      if(IsBigBreakCandle(breakBar, span))
-      {
-         LogBigCandleSkip(s, 1, breakBar, span);
-         return(false);
-      }
-      if(!EmaAgrees(s, 1, breakBar, close, hi, lo))
-         return(false);
-      if(InpBreakMustHold && !BreakHeld(s, 1, hi, lo))
-         return(false);
-
-      signalDir  = 1;
-      signalStop = InpStopAtMidpoint ? midpoint : lo;
-      signalSpan = span;
-      signalHi   = hi;
-      signalLo   = lo;
-      signalWhy  = StringFormat("close %.*f above range high %.*f%s, stop at the %s",
-                                _Digits, close, _Digits, hi,
-                                (emaOn ? ", EMA agrees" : ""),
-                                (InpStopAtMidpoint ? "midpoint" : "far side"));
+      SetBreakReason(StringFormat("other (%s side finished, first break was the %s UK candle)",
+                                  (dir > 0 ? "long" : "short"), TimeToString(firstUk, TIME_MINUTES)));
+      return(false);
    }
-   else if(close < lo)
+   if(IsBigBreakCandle(breakBar, span))
    {
-      if(InpFirstBreakOnly && !IsFirstCloseBeyond(ukDay, boxEnd, false, hi, lo, breakBar, firstUk))
-      {
-         LogSideFinished(s, ukDay, -1, firstUk, lo);
-         return(false);
-      }
-      if(IsBigBreakCandle(breakBar, span))
-      {
-         LogBigCandleSkip(s, -1, breakBar, span);
-         return(false);
-      }
-      if(!EmaAgrees(s, -1, breakBar, close, hi, lo))
-         return(false);
-      if(InpBreakMustHold && !BreakHeld(s, -1, hi, lo))
-         return(false);
-
-      signalDir  = -1;
-      signalStop = InpStopAtMidpoint ? midpoint : hi;
-      signalSpan = span;
-      signalHi   = hi;
-      signalLo   = lo;
-      signalWhy  = StringFormat("close %.*f below range low %.*f%s, stop at the %s",
-                                _Digits, close, _Digits, lo,
-                                (emaOn ? ", EMA agrees" : ""),
-                                (InpStopAtMidpoint ? "midpoint" : "far side"));
+      SetBreakReason(StringFormat("other (big candle, %.*f high to low is above %.0f%% of the %.*f box)",
+                                  _Digits, iHigh(_Symbol, WORK_TF, breakBar) - iLow(_Symbol, WORK_TF, breakBar),
+                                  InpBigBreakSkipPct, _Digits, span));
+      return(false);
    }
+   if(!EmaAgrees(s, dir, breakBar))
+      return(false);
+   if(InpBreakMustHold && !BreakHeld(s, dir, hi, lo, lag))
+      return(false);
 
-   return(CashOpenAllows(s));
-}
-
-//--- InpSkipCashOpenBar: drop a signal whose entry would fall in the cash-open
-//--- bar. Returns true when signalDir is still set.
-bool CashOpenAllows(const int s)
-{
-   if(signalDir != 0 && IsCashOpenSignalCandle(1))
-   {
-      PrintFormat("%s %s: cash-open skip. %s, but the entry would fall in the %s UK bar. "
-                  "Waiting for that bar's close.",
-                  InpComment, SessionTag(s), signalWhy, InpCashOpenUK);
-      signalDir = 0;
-   }
-   return(signalDir != 0);
+   signalDir  = dir;
+   signalStop = InpStopAtMidpoint ? midpoint : (dir > 0 ? lo : hi);
+   signalSpan = span;
+   signalHi   = hi;
+   signalLo   = lo;
+   signalWhy  = StringFormat("close %.*f %s range %s %.*f%s, stop at the %s",
+                             _Digits, close, (dir > 0 ? "above" : "below"),
+                             (dir > 0 ? "high" : "low"), _Digits, (dir > 0 ? hi : lo),
+                             (emaOn ? ", EMA agrees" : ""),
+                             (InpStopAtMidpoint ? "midpoint" : "far side"));
+   return(true);
 }
 
 //--- Is close c a retest close for side dir: beyond the edge, by no more
@@ -748,76 +732,87 @@ bool IsRetestClose(const int dir, const double c, const double hi, const double 
    return(c < lo && lo - c <= InpRetestTolerance);
 }
 
-//--- InpRetestOnly: is the candle that has just closed (index 1) the first
-//--- retest close of a live setup? Sets signalDir and the rest when it is.
+//--- InpRetestOnly: is the candle at index 1 + lag the first retest close of a
+//--- live setup? Sets signalDir and the rest when it is. A close beyond the box
+//--- can only be on one side, so only that side is looked at.
 void DetectRetestEntry(const int s, const datetime ukDay, const int boxEnd,
                        const double hi, const double lo, const double span,
-                       const double midpoint)
+                       const double midpoint, const int lag)
 {
-   double c1 = iClose(_Symbol, WORK_TF, 1);
+   int    bar = 1 + lag;
+   double c1  = iClose(_Symbol, WORK_TF, bar);
+   int    dir = (c1 > hi) ? 1 : ((c1 < lo) ? -1 : 0);
+   if(dir == 0)
+      return;
 
-   for(int k = 0; k < 2; k++)
+   // The setup: the session's first close beyond this edge, older than
+   // the candle being judged. Walking back, so the last hit is the first.
+   int b = -1;
+   for(int i = bar + 1; i < RETEST_EMA_BARS - 4; i++)
    {
-      int dir = (k == 0) ? 1 : -1;
-      if(!IsRetestClose(dir, c1, hi, lo))
-         continue;
-
-      // The setup: the session's first close beyond this edge, older than
-      // the candle being judged. Walking back, so the last hit is the first.
-      int b = -1;
-      for(int i = 2; i < RETEST_EMA_BARS - 4; i++)
-      {
-         datetime t = iTime(_Symbol, WORK_TF, i);
-         if(t <= 0)
-            break;
-         datetime uk = ServerToUk(t);
-         if(UkDayOf(uk) != ukDay || UkMinuteOfDay(uk) < boxEnd)
-            break;
-         double c = iClose(_Symbol, WORK_TF, i);
-         if((dir > 0 && c > hi) || (dir < 0 && c < lo))
-            b = i;
-      }
-      if(b < 0)
-         continue;                            // candle 1 is the break itself, not entered
-
-      double breakClose = iClose(_Symbol, WORK_TF, b);
-      if(!EmaAgrees(s, dir, b, breakClose, hi, lo))
-         continue;
-
-      // From the break candle on: cancelled if price ran more than one box
-      // beyond the edge, used up if an earlier candle was already the retest.
-      bool cancelled = false, used = false;
-      for(int i = b; i >= 2 && !cancelled && !used; i--)
-      {
-         if(dir > 0 && iHigh(_Symbol, WORK_TF, i) > hi + span) cancelled = true;
-         if(dir < 0 && iLow(_Symbol, WORK_TF, i)  < lo - span) cancelled = true;
-         if(!cancelled && i < b && !IsCashOpenSignalCandle(i) &&
-            IsRetestClose(dir, iClose(_Symbol, WORK_TF, i), hi, lo))
-            used = true;
-      }
-      if(cancelled)
-      {
-         PrintFormat("%s %s: retest close %.*f, but the %s setup was cancelled: price ran more than "
-                     "one box (%.*f) beyond the edge first. No trade.",
-                     InpComment, SessionTag(s), _Digits, c1, (dir > 0 ? "long" : "short"), _Digits, span);
-         continue;
-      }
-      if(used)
-         continue;
-
-      signalDir  = dir;
-      signalStop = InpStopAtMidpoint ? midpoint : (dir > 0 ? lo : hi);
-      signalSpan = span;
-      signalHi   = hi;
-      signalLo   = lo;
-      signalWhy  = StringFormat("retest close %.*f within %.2f of range %s %.*f after the break "
-                                "close %.*f at %s UK, stop at the %s",
-                                _Digits, c1, InpRetestTolerance, (dir > 0 ? "high" : "low"),
-                                _Digits, (dir > 0 ? hi : lo), _Digits, breakClose,
-                                TimeToString(ServerToUk(iTime(_Symbol, WORK_TF, b)), TIME_MINUTES),
-                                (InpStopAtMidpoint ? "midpoint" : "far side"));
+      datetime t = iTime(_Symbol, WORK_TF, i);
+      if(t <= 0)
+         break;
+      datetime uk = ServerToUk(t);
+      if(UkDayOf(uk) != ukDay || UkMinuteOfDay(uk) < boxEnd)
+         break;
+      double c = iClose(_Symbol, WORK_TF, i);
+      if((dir > 0 && c > hi) || (dir < 0 && c < lo))
+         b = i;
+   }
+   if(b < 0)
+   {
+      // This candle is the break itself: it arms the setup, it is not entered.
+      if(EmaAgrees(s, dir, bar))
+         SetBreakReason("retest-only pending");
       return;
    }
+
+   double breakClose = iClose(_Symbol, WORK_TF, b);
+   if(!EmaAgrees(s, dir, b))
+      return;
+
+   // From the break candle on: cancelled if price ran more than one box
+   // beyond the edge, used up if an earlier candle was already the retest.
+   // A retest close on the cash-open candle does not use the setup up: its
+   // entry is deferred one bar and, if that fails, the next retest counts.
+   bool cancelled = false, used = false;
+   for(int i = b; i > bar && !cancelled && !used; i--)
+   {
+      if(dir > 0 && iHigh(_Symbol, WORK_TF, i) > hi + span) cancelled = true;
+      if(dir < 0 && iLow(_Symbol, WORK_TF, i)  < lo - span) cancelled = true;
+      if(!cancelled && i < b && !IsCashOpenSignalCandle(i) &&
+         IsRetestClose(dir, iClose(_Symbol, WORK_TF, i), hi, lo))
+         used = true;
+   }
+   if(cancelled)
+   {
+      SetBreakReason(StringFormat("other (retest setup cancelled, price ran more than one box %.*f beyond the edge)",
+                                  _Digits, span));
+      return;
+   }
+   if(used)
+   {
+      SetBreakReason("other (retest already used)");
+      return;
+   }
+   if(!IsRetestClose(dir, c1, hi, lo))
+   {
+      SetBreakReason("retest-only pending");   // beyond the edge by more than the tolerance
+      return;
+   }
+
+   signalDir  = dir;
+   signalStop = InpStopAtMidpoint ? midpoint : (dir > 0 ? lo : hi);
+   signalSpan = span;
+   signalHi   = hi;
+   signalLo   = lo;
+   signalWhy  = StringFormat("retest close %.*f within %.2f of range %s %.*f after the break "
+                             "close %.*f at %s UK, stop at the %s",
+                             _Digits, c1, InpRetestTolerance, (dir > 0 ? "high" : "low"),
+                             _Digits, (dir > 0 ? hi : lo), _Digits, breakClose,
+                             TimeToString(ServerToUk(iTime(_Symbol, WORK_TF, b)), TIME_MINUTES),
+                             (InpStopAtMidpoint ? "midpoint" : "far side"));
 }
 
 //+------------------------------------------------------------------+
@@ -920,11 +915,28 @@ int OnInit()
       Print("InpFastEmaPeriod must be smaller than InpSlowEmaPeriod.");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   if(InpMinRangePoints <= 0 || InpMaxRangePoints < InpMinRangePoints)
+   // InpAutoHeightBySymbol. 500 and 2500 are the two inputs' defaults above.
+   minRangePoints = InpMinRangePoints;
+   maxRangePoints = InpMaxRangePoints;
+   string upper = _Symbol;
+   StringToUpper(upper);
+   bool isDow = (StringFind(upper, "DJ30") >= 0 || StringFind(upper, "US30") >= 0);
+   bool heightAtDefault = (InpMinRangePoints == 500 && InpMaxRangePoints == 2500);
+   bool autoHeight = InpAutoHeightBySymbol && isDow && heightAtDefault;
+   if(autoHeight)
+   {
+      minRangePoints = 5000;
+      maxRangePoints = 40000;
+   }
+   if(minRangePoints <= 0 || maxRangePoints < minRangePoints)
    {
       Print("Range height bounds are inconsistent.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+   PrintFormat("%s: range height %d to %d points (%.*f to %.*f in price) on %s, %s.",
+               InpComment, minRangePoints, maxRangePoints,
+               _Digits, minRangePoints * _Point, _Digits, maxRangePoints * _Point, _Symbol,
+               (autoHeight ? "Dow defaults from InpAutoHeightBySymbol" : "from the height inputs"));
    if(InpTp2RangeMult <= InpTp1RangeMult || InpTp1RangeMult <= 0.0)
    {
       Print("InpTp2RangeMult must be greater than InpTp1RangeMult, and both above zero.");
@@ -1090,8 +1102,7 @@ int OnInit()
       sess[s].openTime      = 0;
       sess[s].risk          = 0.0;
       sess[s].exitTag       = "";
-      sess[s].longFinishedDay  = 0;
-      sess[s].shortFinishedDay = 0;
+      sess[s].noEntryLoggedDay = 0;
    }
 
    LogBrokerCapabilities();
@@ -1164,43 +1175,149 @@ void OnTick()
       if(s == SESSION_FADE || !SessionEnabled(s))
          continue;                  // the fade has its own trigger, below
 
-      // Never enter at or after this session's own flatten time. Without this
-      // a session whose last entry time equals its flatten time, which is the
-      // New York default, would open a position and close it in the same
-      // second. For London, last entry 12:30 against a 20:00 flat, it can
-      // never fire.
-      if(IsPastFlatten(s))
-         continue;
-
-      long magic = SessionMagic(s);
-      if(CountMyPositions(magic) >= InpMaxPositions)
-         continue;
-      if(InpMaxTradesPerDay > 0 && CountMyEntriesToday(magic) >= InpMaxTradesPerDay)
-         continue;
-      if(CountMyPendingOrders(magic) > 0)
-         continue;                  // a retest limit of this session is still live
-
-      if(!DetectSignal(s))
-         continue;
-
-      if(!IsSpreadAcceptable())
-      {
-         PrintFormat("%s %s: signal skipped, spread %d above %d points. %s",
-                     InpComment, SessionTag(s), (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-                     InpMaxSpreadPoints, signalWhy);
-         continue;
-      }
-
-      if(InpEntryMode == ENTRY_RETEST)
-         PlaceRetestLimit(s);
-      else
-         OpenPosition(s, signalDir == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+      breakReason = "";
+      if(!TryEntry(s))
+         ReportUntakenBreak(s);
+      LogNoEntry(s);
    }
 
    if(SessionEnabled(SESSION_FADE))
       CheckLidFade();
 
    FlushSettledRecords();
+}
+
+//+------------------------------------------------------------------+
+//| One session's entry decision for the bar that has just closed.    |
+//| True when an order was sent and accepted. Every gate that stops   |
+//| the entry leaves its reason in breakReason.                       |
+//+------------------------------------------------------------------+
+bool TryEntry(const int s)
+{
+   // Never enter at or after this session's own flatten time. Without this
+   // a session whose last entry time equals its flatten time, which is the
+   // New York default, would open a position and close it in the same
+   // second. For London, last entry 12:30 against a 20:00 flat, it can
+   // never fire.
+   if(IsPastFlatten(s))
+   {
+      SetBreakReason("outside time window");
+      return(false);
+   }
+
+   long magic = SessionMagic(s);
+   if(CountMyPositions(magic) >= InpMaxPositions ||
+      (InpMaxTradesPerDay > 0 && CountMyEntriesToday(magic) >= InpMaxTradesPerDay))
+   {
+      SetBreakReason("already traded this session");
+      return(false);
+   }
+   if(CountMyPendingOrders(magic) > 0)
+   {
+      SetBreakReason("other (retest limit still pending)");
+      return(false);
+   }
+
+   if(!DetectSignal(s))
+      return(false);
+
+   if(!IsSpreadAcceptable())
+   {
+      SetBreakReason("spread");
+      return(false);
+   }
+
+   if(InpEntryMode == ENTRY_RETEST)
+      return(PlaceRetestLimit(s));
+   return(OpenPosition(s, signalDir == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL));
+}
+
+//+------------------------------------------------------------------+
+//| Exactly one journal line for a close beyond an active box that    |
+//| was not entered:                                                  |
+//|   OrbLondon NY 2026.11.04 14:25: break LONG at 4049.10 not taken  |
+//|   - <reason>                                                      |
+//| The box is active from its lock to the later of the session's     |
+//| last entry and flatten times. The time is the candle's UK open.   |
+//+------------------------------------------------------------------+
+void ReportUntakenBreak(const int s)
+{
+   datetime barTime = iTime(_Symbol, WORK_TF, 1);
+   if(barTime <= 0)
+      return;
+
+   datetime uk     = ServerToUk(barTime);
+   datetime ukDay  = UkDayOf(uk);
+   int      minute = UkMinuteOfDay(uk);
+   if(minute < SessionBoxEnd(s) || minute >= MathMax(SessionLastEntry(s), SessionFlatten(s)))
+      return;
+
+   double hi = 0.0, lo = 0.0;
+   if(!ComputeSessionBox(s, ukDay, hi, lo))
+      return;
+
+   double c = iClose(_Symbol, WORK_TF, 1);
+   if(c <= hi && c >= lo)
+      return;
+
+   string why = breakReason;
+   if(why == "")
+      why = InpBreakMustHold ? "other (waiting for the next close to hold the break)"
+                             : "other (no signal)";
+
+   PrintFormat("%s %s %s %s: break %s at %.*f not taken %s %s",
+               InpComment, SessionTag(s), TimeToString(ukDay, TIME_DATE),
+               TimeToString(uk, TIME_MINUTES), (c > hi ? "LONG" : "SHORT"),
+               _Digits, c, ShortToString(0x2014), why);
+}
+
+//+------------------------------------------------------------------+
+//| Once per session per day, at the session's last entry time: say   |
+//| so when nothing was entered, with the number of closes beyond the |
+//| box seen until then. Read from bars and history, so a restart     |
+//| does not change the count.                                        |
+//+------------------------------------------------------------------+
+void LogNoEntry(const int s)
+{
+   datetime barTime = iTime(_Symbol, WORK_TF, 1);
+   if(barTime <= 0)
+      return;
+
+   datetime uk        = ServerToUk(barTime);
+   datetime ukDay     = UkDayOf(uk);
+   int      lastEntry = SessionLastEntry(s);
+   int      barMinutes = PeriodSeconds(WORK_TF) / 60;
+   if(UkMinuteOfDay(uk) + barMinutes < lastEntry || sess[s].noEntryLoggedDay == ukDay)
+      return;
+   if(ukDay != UkDayOf(ServerToUk(ServerNow())))
+      return;                       // first tick after a weekend or restart: an older day
+   sess[s].noEntryLoggedDay = ukDay;
+
+   double hi = 0.0, lo = 0.0;
+   if(!ComputeSessionBox(s, ukDay, hi, lo))
+      return;                       // no session that day, a Sunday or a holiday
+   if(CountMyEntriesToday(SessionMagic(s)) > 0)
+      return;
+
+   int breaks = 0;
+   int boxEnd = SessionBoxEnd(s);
+   for(int i = 1; i <= SCAN_BARS; i++)
+   {
+      datetime t = iTime(_Symbol, WORK_TF, i);
+      if(t <= 0)
+         break;
+      datetime tUk = ServerToUk(t);
+      if(UkDayOf(tUk) != ukDay || UkMinuteOfDay(tUk) < boxEnd)
+         break;
+      if(UkMinuteOfDay(tUk) >= lastEntry)
+         continue;
+      double c = iClose(_Symbol, WORK_TF, i);
+      if(c > hi || c < lo)
+         breaks++;
+   }
+
+   PrintFormat("%s %s %s: no entry by %02d:%02d (%d breaks seen)", InpComment, SessionTag(s),
+               TimeToString(ukDay, TIME_DATE), lastEntry / 60, lastEntry % 60, breaks);
 }
 
 //+------------------------------------------------------------------+
@@ -1856,12 +1973,15 @@ bool HasClosedPart(const ulong positionId)
 //| a multiple of the box height, and the lot from the real stop       |
 //| distance rather than from a fixed point count.                    |
 //+------------------------------------------------------------------+
-void OpenPosition(const int s, ENUM_ORDER_TYPE type)
+bool OpenPosition(const int s, ENUM_ORDER_TYPE type)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0.0 || bid <= 0.0)
-      return;
+   {
+      SetBreakReason("other (no price)");
+      return(false);
+   }
 
    // Respect the broker's minimum stop distance, never below the floor the
    // user asked for.
@@ -1882,18 +2002,18 @@ void OpenPosition(const int s, ENUM_ORDER_TYPE type)
    {
       SkipRecord(idx, StringFormat("stop %.*f is not %d points below ask %.*f",
                                    _Digits, sl, (int)stopsLevel, _Digits, price));
-      return;
+      return(false);
    }
    if(!isBuy && sl < price + minGap)
    {
       SkipRecord(idx, StringFormat("stop %.*f is not %d points above bid %.*f",
                                    _Digits, sl, (int)stopsLevel, _Digits, price));
-      return;
+      return(false);
    }
    if(MathAbs(tp - price) < minGap)
    {
       SkipRecord(idx, StringFormat("target %.*f is inside the stops level", _Digits, tp));
-      return;
+      return(false);
    }
 
    double slDistance = MathAbs(price - sl);
@@ -1901,7 +2021,7 @@ void OpenPosition(const int s, ENUM_ORDER_TYPE type)
    if(lot <= 0.0)
    {
       SkipRecord(idx, "calculated lot is zero; risk too small or balance too low");
-      return;
+      return(false);
    }
 
    trade.SetExpertMagicNumber(SessionMagic(s));
@@ -1920,12 +2040,10 @@ void OpenPosition(const int s, ENUM_ORDER_TYPE type)
                   _Digits, tp, signalWhy);
       sess[s].pendingRecord = idx;
       SyncTracking(s);
+      return(true);
    }
-   else
-   {
-      SkipRecord(idx, StringFormat("order rejected: %s", RetcodeText(code)));
-      PrintFormat("Order rejected: %s (retcode %u)", RetcodeText(code), code);
-   }
+   SkipRecord(idx, StringFormat("order rejected: %s, retcode %u", RetcodeText(code), code));
+   return(false);
 }
 
 //+------------------------------------------------------------------+
@@ -1934,12 +2052,15 @@ void OpenPosition(const int s, ENUM_ORDER_TYPE type)
 //| The order is cancelled by ManagePendingOrders after               |
 //| InpRetestBars candles, or if a candle closes back inside the box.  |
 //+------------------------------------------------------------------+
-void PlaceRetestLimit(const int s)
+bool PlaceRetestLimit(const int s)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0.0 || bid <= 0.0)
-      return;
+   {
+      SetBreakReason("other (no price)");
+      return(false);
+   }
 
    long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel < InpMinStopsLevel)
@@ -1962,25 +2083,25 @@ void PlaceRetestLimit(const int s)
    {
       SkipRecord(idx, StringFormat("SKIPPED_NO_ROOM: limit %.*f is not %d points below ask %.*f",
                                    _Digits, entry, (int)stopsLevel, _Digits, ask));
-      return;
+      return(false);
    }
    if(!isBuy && entry < bid + minGap)
    {
       SkipRecord(idx, StringFormat("SKIPPED_NO_ROOM: limit %.*f is not %d points above bid %.*f",
                                    _Digits, entry, (int)stopsLevel, _Digits, bid));
-      return;
+      return(false);
    }
    if(MathAbs(entry - sl) < minGap || MathAbs(tp - entry) < minGap)
    {
       SkipRecord(idx, "stop or target closer than the broker's minimum distance");
-      return;
+      return(false);
    }
 
    double lot = CalculateLot(MathAbs(entry - sl));
    if(lot <= 0.0)
    {
       SkipRecord(idx, "calculated lot is zero; risk too small or balance too low");
-      return;
+      return(false);
    }
 
    trade.SetExpertMagicNumber(SessionMagic(s));
@@ -1998,12 +2119,10 @@ void PlaceRetestLimit(const int s)
                                   : entry - signalSpan * InpTp1RangeMult),
                   _Digits, tp, InpRetestBars, signalWhy);
       sess[s].pendingRecord = idx;
+      return(true);
    }
-   else
-   {
-      SkipRecord(idx, StringFormat("limit rejected: %s", RetcodeText(code)));
-      PrintFormat("Limit order rejected: %s (retcode %u)", RetcodeText(code), code);
-   }
+   SkipRecord(idx, StringFormat("limit rejected: %s, retcode %u", RetcodeText(code), code));
+   return(false);
 }
 
 //+------------------------------------------------------------------+
@@ -2482,7 +2601,12 @@ void SkipRecord(const int idx, const string reason)
    records[idx].retest  = (InpEntryMode == ENTRY_RETEST) ? "N" : "-";
    records[idx].settled = true;
 
-   PrintFormat("%s %s: entry skipped, %s. %s", InpComment, SessionTag(s), reason, signalWhy);
+   // A London or New York entry is reported by ReportUntakenBreak, on the
+   // one line its break gets. The lid fade has no such line.
+   if(s == SESSION_FADE)
+      PrintFormat("%s %s: entry skipped, %s. %s", InpComment, SessionTag(s), reason, signalWhy);
+   else
+      SetBreakReason("other (entry skipped, " + reason + ")");
 
    if(sess[s].pendingRecord == idx)
       sess[s].pendingRecord = -1;

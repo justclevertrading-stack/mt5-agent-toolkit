@@ -116,3 +116,38 @@ your compiled defaults entirely. See `scripts/backtest.ps1`, note 8.
 .\scripts\backtest.ps1 -Expert "MyEA.ex5" -Symbol EURUSD -Period M5 `
     -From 2025.02.01 -To 2026.08.01 -Inputs @{ InpUseTrendFilter = $false }
 ```
+
+## One reason line per refused signal bar (OrbLondon 1.17)
+
+Verified in the Strategy Tester, 2026-11-08. A per-run tally says how often a
+gate refused; it cannot say why *this* breakout on *this* day was not traded.
+For that, print exactly one line for every bar that met the trigger and was
+not entered, with the first gate that refused it.
+
+Seen live, 2026-11-04: XAUUSD closed above the NY box and OrbLondon 1.16
+printed nothing. Retest-only mode had three silent exits (bar is the break
+itself, close beyond the tolerance, setup already used), so the journal
+looked like the EA was not running.
+
+```cpp
+string breakReason = "";            // reset per session per bar
+
+void SetBreakReason(const string why)   // the first gate to refuse wins
+{
+   if(breakReason == "")
+      breakReason = why;
+}
+
+// OnTick, once per closed bar and session:
+breakReason = "";
+if(!TryEntry(s))                    // every early return calls SetBreakReason
+   ReportUntakenBreak(s);           // prints only if bar 1 closed beyond the box
+```
+
+`ReportUntakenBreak` recomputes the trigger from bars, so a gate that forgot
+to give a reason still produces a line, with `other (no signal)`. Remove the
+gates' own `Print` calls, or the bar gets two lines. Order entry functions to
+return `bool` so a rejected order also ends up as the bar's reason.
+
+A literal em dash in a `PrintFormat` format string needs the source saved as
+UTF-8 with BOM or UTF-16. In an ASCII source, use `ShortToString(0x2014)`.

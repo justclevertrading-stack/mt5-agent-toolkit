@@ -187,6 +187,17 @@ between runs. Baseline is every one of them at its default.
 | `InpCloseBackInsideExit` | false | true: close an open position when a candle closes back inside its box. **New behaviour.** The build before 2026-09-27 had no such exit, which is why the default is off: turning it on invalidates every earlier result |
 | `InpNyEmaFilter` | `NY_EMA_CROSS` | New York only. `NY_EMA_OFF` (1): no trend filter in New York. `NY_EMA_SLOPE` (2): EMA9 rose on each of the last three bars for a long (fell, for a short), no cross needed; read on the break candle. London keeps the cross. `InpUseEmaFilter = false` still turns both off |
 | `InpBreakMustHold` | false | true: the first close beyond a side is only taken if the next candle also closes beyond it; entry on that second close. The EMA filter is still read on the break candle, so the trades are a subset of the default ones. A break that does not hold finishes that side for the session. Both sessions |
+| `InpAutoHeightBySymbol` | true | 1.17. On a symbol whose name contains `DJ30` or `US30`, while both height inputs are still 500 / 2500, the bounds become 5000 / 40000 points (50 to 400 index points). Height inputs changed by hand always win. The bounds used are logged in OnInit |
+| `InpSkipCashOpenBar` | true | 1.17 changed it from "skip" to "defer". A signal on the candle that closes at `InpCashOpenUK` (14:25-14:30 UK) is not entered inside the cash-open bar; it still counts as the first break, and is entered at the cash-open bar's close (14:35) if that bar also closes beyond the same edge, same stop and targets, EMA read on the break candle. Back inside: the break failed, so with `InpFirstBreakOnly` that side is finished. In `InpRetestOnly` mode a deferred retest that fails leaves the setup live for the next retest close. 1.16 did not count the cash-open candle as the first break at all, so a later close beyond the same edge could still be entered |
+
+**Journal, 1.17.** Every M5 close beyond an active box that is not entered
+prints one line, `OrbLondon NY 2026.11.04 14:35: break LONG at 4048.71 not
+taken — retest-only pending`. The time is the candle's UK open. Reasons:
+`cash-open bar (deferred)`, `trend filter`, `retest-only pending`, `height`,
+`outside time window`, `spread`, `already traded this session`, `chop filter`,
+`other (<text>)`. The box is active from its lock to the later of the last
+entry and flatten times. At the last entry time, if the session made no entry:
+`OrbLondon NY 2026.11.04: no entry by 16:00 (2 breaks seen)`.
 
 Measured XAUUSD M5, 2025.01.01 to 2025.09.12, model 1, 100% history quality,
 1% risk, $10,000, commission 0. Statistics are per position: MT5 counts each

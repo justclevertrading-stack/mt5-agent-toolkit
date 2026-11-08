@@ -365,3 +365,36 @@ if(isBuy && entry > ask - minGap)   // no room left, the retest already happened
 ```
 
 **Recorded:** 2026-09-27
+
+## Deferring an entry by one bar without remembering anything
+
+Verified in the Strategy Tester, 2026-11-08 (OrbLondon 1.17, cash-open
+deferral). When a signal must not be entered on a given bar but should be
+entered on the next close if it still holds, do not store a "deferred" flag.
+A restart would lose it. Instead, write the signal test with a `lag` and,
+on the next bar, ask the same function whether there *was* a signal one bar
+ago:
+
+```cpp
+// lag 0 judges the bar that has just closed (index 1), lag 1 the one before.
+bool JudgeSignal(..., const int lag)
+{
+   int breakBar = 1 + lag;
+   // every read is offset by lag: iClose(_Symbol, WORK_TF, breakBar), the
+   // EMA at breakBar, the "first close beyond" scan from breakBar + 1, ...
+}
+
+// In DetectSignal, before the normal lag-0 judgement:
+if(IsCashOpenSignalCandle(2) && JudgeSignal(..., 1))
+{
+   double c1 = iClose(_Symbol, WORK_TF, 1);
+   if((signalDir > 0 && c1 > hi) || (signalDir < 0 && c1 < lo))
+      return(true);                 // held: enter now, same stop and targets
+   ClearSignal();                   // failed: fall through to the lag-0 test
+}
+```
+
+Two details matter. Load enough indicator values for the larger offset (the
+EMA buffer had to grow from 6 to 7 values for a SLOPE filter at index 3).
+Also reset the reason or log state that the lag-1 pass set, because it
+describes the older bar.
